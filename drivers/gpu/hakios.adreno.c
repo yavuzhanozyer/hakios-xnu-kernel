@@ -114,7 +114,8 @@ static uint32_t speed_bin;              /* which of the GPUs of this kind the fu
  * with an older interface to its firmware. Ported so far: steps 1 and 3 (they read; seen on the phone, 2 November
  * 2026: CX and GX off, cx_gdscr and gx_gdscr 0x222001, the PLLs off) and step 4 (CX on: the switch and its hw-ctrl
  * register are where the SC7280's are, gdsc@509106c and syscon@5091540 in surya's device tree; seen on: 0xf8222000)
- * and step 5 (the GMU's clock at 200 MHz from GPLL0's 300 MHz tap, the SMMU's vote; no hub clock). The steps after 5 are
+ * step 5 (the GMU's clock at 200 MHz from GPLL0's 300 MHz tap, the SMMU's vote; no hub clock) and step 6 (the GMU's
+ * registers at 0x506a000, its always-on counter, the GBIF and cx_misc: reads). The steps after 6 are
  * the 642L's and are refused, step 2 (fuses at another place) is left out. The command database is soc_cmd_db's.
  */
 static uint32_t a618;
@@ -910,6 +911,9 @@ cx_ready(void)
 		    cx_is_on() ? "on" : "off", gmu_clock);
 		return false;
 	}
+	if (a618) {
+		return true;    /* (the SC7280's clock counter is not this SoC's: the clocks' own status bits, as step 5 saw them) */
+	}
 	ahb_hz = measure_quietly(GPUCC_DEBUG_AHB);
 	if (ahb_hz == MEASURE_FAILED) {
 		printf("adreno: %u: the frequency counter did not finish (step 5 shows whether it works)\n", step);
@@ -971,7 +975,8 @@ step_first_words(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
+	announce(a618 ? "read registers of the Adreno 618's GMU (0x506a000): the first words from the GPU block itself" :
+	    "read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	get(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG);
 	get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
@@ -998,7 +1003,8 @@ step_first_words(void)
 		get(&gmu, "dtcm, where firmware has its versions", GMU_DTCM_VERSIONS + 4 * i);
 	}
 
-	announce("read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
+	announce(a618 ? "read the GPU's bus interface (0x500f000) and the CX odds and ends (0x509e000)" :
+	    "read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
 	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
 	get(&gbif, "halt", GBIF_HALT);
 	get(&gbif, "halt_ack", GBIF_HALT_ACK);
@@ -3822,12 +3828,18 @@ hakios_adreno_init(void)
 	}
 	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
 	if (PE_parse_boot_argn("adreno_a618", &a618, sizeof(a618)) && a618) {
+		/* surya's device tree: qcom,gpucc 0x5090000; qcom,gmu kgsl_gmu_reg 0x506a000 (0x31000); kgsl-3d0 at 0x5000000,
+		 * its GBIF at words 0x3c00 on (the 618 has one: adreno_has_gbif()); cx_misc 0x509e000 */
 		gpucc.phys = 0x05090000;
+		gmu.phys = 0x0506a000;
+		gmu.size = 0x31000;
+		gbif.phys = 0x05000000 + 4 * 0x3c00;
+		cx_misc.phys = 0x0509e000;
 		skip_steps |= 1u << 2;                  /* the fuses: where the SM7150 keeps its speed bin is not known here */
-		if (last_step > 5 || by_itself) {
-			printf("adreno: the Adreno 618: only steps 1, 3, 4 and 5 are ported (step 4 switches the CX half on, step 5 "
-			    "the GMU's and SMMU's clocks); stopping after step 5\n");
-			last_step = 5;
+		if (last_step > 6 || by_itself) {
+			printf("adreno: the Adreno 618: only steps 1, 3, 4, 5 and 6 are ported (step 4 switches the CX half on, step 5 "
+			    "the GMU's and SMMU's clocks, step 6 reads the GMU); stopping after step 6\n");
+			last_step = 6;
 			by_itself = false;
 			keep = 0;
 		}
@@ -3836,8 +3848,8 @@ hakios_adreno_init(void)
 		last_step = only;
 		skip_steps = ~(1u << only);
 	}
-	if (a618 && last_step > 5) {
-		last_step = 5;                          /* (adreno_only=N past 5: the same refusal) */
+	if (a618 && last_step > 6) {
+		last_step = 6;                          /* (adreno_only=N past 6: the same refusal) */
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
