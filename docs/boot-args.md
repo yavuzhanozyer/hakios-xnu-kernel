@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **333 arguments**: 281 read by the kernel, 14 by the loader, 48 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **334 arguments**: 282 read by the kernel, 15 by the loader, 48 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -389,7 +389,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (6)
+## Loader (7)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -399,6 +399,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `serial` | L | `loader.c` | `CONFIG_SERIAL` |  |
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
+| `vtimer_intid` | KL | `gic_v3_irq.c`, `loader.c` | `CONFIG_VTIMER_INTID` |  |
 
 ## User space (16)
 

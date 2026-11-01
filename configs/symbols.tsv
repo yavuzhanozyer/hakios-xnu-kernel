@@ -266,6 +266,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
 VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
 VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
 VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
+VTIMER_INTID	arg	vtimer_intid	Loader	kl	gic_v3_irq.c,loader.c	
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	

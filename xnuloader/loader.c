@@ -561,6 +561,7 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	const char *kernel_args;         /* given to the kernel ahead of the payload's: what this SoC needs that others do not */
 };
 
 static const struct platform platform_qemu_virt = {
@@ -601,6 +602,12 @@ static const struct platform platform_sm7150 = {
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	.small_cores = 0x3f,
+	/*
+	 * The timer's interrupt: this SoC numbers its timer PPIs as older Qualcomm SoCs do (the device tree's
+	 * <GIC_PPI 3 ...> is INTID 19 for the virtual timer, not ARM's 27): a kernel waiting on 27 hears no timer and
+	 * stops at its first timed sleep, right after the framebuffer (seen on the POCO X3 NFC, 1 November 2026).
+	 */
+	.kernel_args = "vtimer_intid=19 ",
 };
 
 /* ------------------------------------------------------------------------ */
@@ -3144,6 +3151,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* one processor unless the payload asks for more (of two "cpus=" the kernel takes the first) */
 	if (!more_cores) {
 		for (const char *c = "cpus=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+	}
+	/* what this SoC needs (struct platform), unless the payload says so itself */
+	if (PLAT->kernel_args != NULL) {
+		int own_vtimer = 0;
+
+		for (const char *c = pi.cmdline; *c; c++) {
+			own_vtimer |= starts_with(c, "vtimer_intid=") && (c == pi.cmdline || c[-1] == ' ');
+		}
+		for (const char *c = PLAT->kernel_args; !own_vtimer && *c && n < BOOT_LINE_LENGTH - 1; c++) {
 			ba->commandLine[n++] = *c;
 		}
 	}

@@ -72,7 +72,14 @@
 
 #define GIC_SGI_SIGNAL          0           /* cpu_signal(): another processor wants this one's attention */
 #define GIC_SGI_STOP            1           /* psci_smp_stop_here(): the system is going back to the boot loader */
-#define GIC_INTID_VTIMER        27          /* EL1 virtual timer PPI */
+/*
+ * The EL1 virtual timer's interrupt: PPI 27 as ARM numbers it, and as the SC7280 (redwood) and QEMU have it. Older
+ * Qualcomm SoCs number their timer PPIs from 16 instead (the device tree's <GIC_PPI 3 ...>: 19 for the virtual timer;
+ * SDM845, SM7150, the POCO X3 NFC): the ios-sweet port found it on that SoC, and a kernel waiting on 27 there never
+ * hears its timer and stops at its first timed sleep. boot-arg vtimer_intid=N (16 to 31); the loader gives the SM7150's.
+ */
+static uint32_t gic_intid_vtimer = 27;
+#define GIC_INTID_VTIMER        gic_intid_vtimer
 #define GIC_INTID_SPI_MIN       32
 #define GIC_INTID_SPURIOUS_MIN  1020
 #define GIC_SPI_MOST            48          /* attached at a time */
@@ -418,12 +425,17 @@ gic_v3_irq_cpu_init(void)
 {
 	int cpu = cpu_number();
 	vm_offset_t gicr;
-	uint32_t mine = 1u << GIC_INTID_VTIMER;
+	uint32_t mine;
 
 	if (gicd_base == 0) {
 		DTEntry entry;
 		void const *prop;
 		unsigned int prop_size;
+		uint32_t vtimer = 0;
+
+		if (PE_parse_boot_argn("vtimer_intid", &vtimer, sizeof(vtimer)) && vtimer >= 16 && vtimer <= 31) {
+			gic_intid_vtimer = vtimer;
+		}
 
 		if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
 		    SecureDTGetProperty(entry, "reg", &prop, &prop_size) != kSuccess ||
@@ -449,6 +461,7 @@ gic_v3_irq_cpu_init(void)
 	__builtin_arm_isb(ISB_SY);
 
 	gicr = gicr_cpu_base[cpu] = gic_find_redistributor();
+	mine = 1u << GIC_INTID_VTIMER;
 
 	uint32_t waker = gic_read32(gicr + GICR_WAKER);
 	if (waker & (GICR_WAKER_PROCSLEEP | GICR_WAKER_CHILDASLEEP)) {
