@@ -23,7 +23,7 @@ pull() { # DIR SOURCE...  (missing files are told, not fatal)
 	echo "pull-firmware.sh: $dir: $(ls -1 "$dir" | wc -l | tr -d ' ') files"
 	rmdir "$dir" 2>/dev/null || true        # nothing pulled: no empty directory for userland/build.sh to trip on
 }
-pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin $(for i in mdt b00 b01 b02; do echo /vendor/firmware/a615_zap.$i; done)
+pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin /vendor/firmware/a630_gmu.bin $(for i in mdt b00 b01 b02; do echo /vendor/firmware/a615_zap.$i; done)
 pull fw-audio /vendor/firmware_mnt/image/adsp.mdt $(for i in $(seq -w 0 20); do echo /vendor/firmware_mnt/image/adsp.b$i; done)
 pull fw-modem /vendor/firmware_mnt/image/modem.mdt $(for i in $(seq -w 0 30); do echo /vendor/firmware_mnt/image/modem.b$i; done)
 for f in novatek_ts_tianma_fw.bin novatek_ts_huaxing_fw.bin; do
