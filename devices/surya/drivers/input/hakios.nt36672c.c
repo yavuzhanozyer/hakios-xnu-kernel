@@ -747,21 +747,58 @@ nvt_scale(int v, uint32_t size)
 	return (uint32_t)(((uint64_t)(uint32_t)v * 65535u) / (size - 1u));
 }
 
+/*
+ * How many moves go to the window server. The chip is polled every 10 ms, and a finger held still reads a pixel or
+ * two different from one poll to the next: a move each time, 100 a second a finger, was more than a system drawing
+ * in software could take. backboardd fell 75 s behind (its AttentionAwareness filter said so), the 512-record queue
+ * dropped its oldest, and with them fingers' lifts: two and three fingers stuck down, and no gesture (POCO X3 NFC,
+ * 2 November 2026). A move is sent when the finger has gone touch_move_px pixels (default 4) since the last one sent
+ * and touch_move_ms (default 16: 60 a second) have passed; a landing and a lift always, the lift where it last was.
+ */
+static uint32_t move_px = 4, move_ms = 16;
+static int sent_x[TOUCH_MAX], sent_y[TOUCH_MAX];
+static uint64_t sent_at[TOUCH_MAX];
+static struct {
+	uint64_t downs, moves, ups, skipped;
+} nvt_count;
+
+static void
+nvt_post(uint32_t type, unsigned id, int x, int y)
+{
+	hakios_touch_post(type, id, nvt_scale(x, NVT_PANEL_W), nvt_scale(y, NVT_PANEL_H));
+	sent_x[id] = x;
+	sent_y[id] = y;
+	sent_at[id] = mach_absolute_time();
+}
+
 static void
 nvt_report(uint32_t mask, const int *x, const int *y)
 {
+	uint64_t now = mach_absolute_time(), interval;
+
+	nanoseconds_to_absolutetime((uint64_t)move_ms * NSEC_PER_MSEC, &interval);
 	for (unsigned id = 0; id < TOUCH_MAX; ++id) {
 		uint32_t bit = 1u << id;
 		if (mask & bit) {
 			if (!(nv.active & bit)) {
-				hakios_touch_post(HAKIOS_TOUCH_DOWN, id, nvt_scale(x[id], NVT_PANEL_W), nvt_scale(y[id], NVT_PANEL_H));
-			} else if (x[id] != nv.x[id] || y[id] != nv.y[id]) {
-				hakios_touch_post(HAKIOS_TOUCH_MOVE, id, nvt_scale(x[id], NVT_PANEL_W), nvt_scale(y[id], NVT_PANEL_H));
+				nvt_post(HAKIOS_TOUCH_DOWN, id, x[id], y[id]);
+				nvt_count.downs++;
+			} else if (x[id] != sent_x[id] || y[id] != sent_y[id]) {
+				int dx = x[id] - sent_x[id], dy = y[id] - sent_y[id];
+				bool far = (uint32_t)(dx < 0 ? -dx : dx) >= move_px || (uint32_t)(dy < 0 ? -dy : dy) >= move_px;
+
+				if (far && now - sent_at[id] >= interval) {
+					nvt_post(HAKIOS_TOUCH_MOVE, id, x[id], y[id]);
+					nvt_count.moves++;
+				} else {
+					nvt_count.skipped++;
+				}
 			}
 			nv.x[id] = x[id];
 			nv.y[id] = y[id];
 		} else if (nv.active & bit) {
-			hakios_touch_post(HAKIOS_TOUCH_UP, id, nvt_scale(nv.x[id], NVT_PANEL_W), nvt_scale(nv.y[id], NVT_PANEL_H));
+			nvt_post(HAKIOS_TOUCH_UP, id, nv.x[id], nv.y[id]);
+			nvt_count.ups++;
 		}
 	}
 	nv.active = mask;
@@ -864,9 +901,22 @@ nvt_thread(void *arg, wait_result_t result)
 		goto out;
 	}
 	(void)nvt_set_page(nv.map->event_buf);
-	printf("nt36672c: polling touch every 10 ms\n");
-	unsigned errors = 0, wdt = 0;
+	(void)PE_parse_boot_argn("touch_move_px", &move_px, sizeof(move_px));
+	(void)PE_parse_boot_argn("touch_move_ms", &move_ms, sizeof(move_ms));
+	if (move_px > 100) {
+		move_px = 4;
+	}
+	if (move_ms > 1000) {
+		move_ms = 16;
+	}
+	printf("nt36672c: polling touch every 10 ms; a move goes out after %u px and %u ms\n", move_px, move_ms);
+	unsigned errors = 0, wdt = 0, ticks = 0;
 	while (!nv.dead) {
+		/* a minute's summary: what went to the window server, and what was held back */
+		if (++ticks % 6000 == 0 && nvt_count.downs != 0) {
+			printf("nt36672c: so far %llu landings, %llu moves, %llu lifts; %llu small or early moves held back\n",
+			    nvt_count.downs, nvt_count.moves, nvt_count.ups, nvt_count.skipped);
+		}
 		int err = nvt_poll(&wdt);
 		if (err) {
 			if ((errors++ % 100u) == 0) {
