@@ -111,7 +111,9 @@ static uint32_t speed_bin;              /* which of the GPUs of this kind the fu
 /*
  * boot-arg adreno_a618=1: the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
  * of the a6xx: its clock controller at 0x5090000 (dt qcom,gpucc-sdmmagpie), the GPU at 0x5000000, the GMU at 0x506a000
- * with an older interface to its firmware. Only what reads (steps 1 and 3) is ported so far: the steps after 3 are
+ * with an older interface to its firmware. Ported so far: steps 1 and 3 (they read; seen on the phone, 2 November
+ * 2026: CX and GX off, cx_gdscr and gx_gdscr 0x222001, the PLLs off) and step 4 (CX on: the switch and its hw-ctrl
+ * register are where the SC7280's are, gdsc@509106c and syscon@5091540 in surya's device tree). The steps after 4 are
  * the 642L's and are refused, step 2 (fuses at another place) is left out. The command database is soc_cmd_db's.
  */
 static uint32_t a618;
@@ -486,7 +488,7 @@ static struct block gpucc = { "gpucc", 0x03d90000, 0x9000 };
 #define GPUCC_HUB_RCGR          0x117c          /* gpu_cc_hub_clk_src */
 #define GPUCC_HUB_CX_INT_CBCR   0x1204          /* gpu_cc_hub_cx_int_clk */
 #define GPUCC_CX_HW_CTRL        0x1540          /* dt: gpu_cx_hw_ctrl: bit 31 is where the vendor's driver sees CX come on */
-#define GPUCC_GX_DOMAIN_MISC    0x158c          /* dt: gpu_gx_domain_addr */
+#define GPUCC_GX_DOMAIN_MISC    (a618 ? 0x1508 : 0x158c)        /* dt: gpu_gx_domain_addr (surya: syscon@5091508) */
 #define GPUCC_SMMU_VOTE_CBCR    0x5000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
 
 #define GDSC_SW_COLLAPSE        (1u << 0)       /* a power switch's control register (gdsc.c): off, by software */
@@ -3794,10 +3796,10 @@ hakios_adreno_init(void)
 	if (PE_parse_boot_argn("adreno_a618", &a618, sizeof(a618)) && a618) {
 		gpucc.phys = 0x05090000;
 		skip_steps |= 1u << 2;                  /* the fuses: where the SM7150 keeps its speed bin is not known here */
-		if (last_step > 3 || by_itself) {
-			printf("adreno: the Adreno 618: only steps 1 and 3 are ported (they read; step 3 switches on the clock of "
-			    "the clock controller's registers); stopping after step 3\n");
-			last_step = 3;
+		if (last_step > 4 || by_itself) {
+			printf("adreno: the Adreno 618: only steps 1, 3 and 4 are ported (they read; step 4 switches the CX half on); "
+			    "stopping after step 4\n");
+			last_step = 4;
 			by_itself = false;
 			keep = 0;
 		}
@@ -3806,8 +3808,8 @@ hakios_adreno_init(void)
 		last_step = only;
 		skip_steps = ~(1u << only);
 	}
-	if (a618 && last_step > 3) {
-		last_step = 3;                          /* (adreno_only=N past 3: the same refusal) */
+	if (a618 && last_step > 4) {
+		last_step = 4;                          /* (adreno_only=N past 4: the same refusal) */
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));
