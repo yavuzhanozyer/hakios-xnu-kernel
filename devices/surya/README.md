@@ -45,9 +45,31 @@ firmware's `reset state 0xa?`.
 | power, volume down | PMK8350 PON (split, 0x1300) | PM6150 PON (0x800, bits 0 and 1) | `buttons_pon=0x008 buttons_pon_gen=2` |
 | volume up | PM7325 GPIO6 (0x18d) | PM6150L GPIO2 (0x4c1) | `buttons_volup=0x4c1` |
 
-## Next
+## What else is on, and what is not yet
 
-In the order of `docs/porting/index.md`: `SOCINFO` (`soc_smem=0x86000000`), the temperature sensors and the processor clocks
-of this SoC, then UFS, then the Adreno 618. `tools/soc-args.py` on the phone's own device tree (`adb pull /sys/firmware/fdt`) gives the `soc_*` the modem wants.
+On with this configuration, each written from this SoC's own facts and not yet run on the phone:
+
+| Part | How | Boot-arguments |
+|---|---|---|
+| processor clocks | both groups (cores 0-5, 6-7) to the top row of their table, through the OSM hardware the firmware switched on | `cpufreq=1 cpufreq_osm=1` |
+| memory bandwidth | the BCM vote that comes with cpufreq, its addresses from this SoC's command database | `soc_cmd_db=0x85f20000` (`ddr=0`: no vote) |
+| temperature | both TSENS v2 blocks, every sensor by number, the run stopped at 105 C | `thermal=1 thermal_table=2` |
+| chip identity | SMEM item 137 | `socinfo=1 soc_smem=0x86000000` |
+| PMIC inventory | every block of the PMICs, read only | `pmic=1` |
+| battery | the level and the charger from UEFI's charger drivers, read by the loader | `battery=1` (`battery_stop=15` to end a run before it is flat) |
+
+Not yet, and why each needs the phone at hand, a step at a time, rather than code written blind:
+
+- **GPU (Adreno 618)**: `hakios.adreno.c` wakes a 642L in 22 steps, with the 650 family's GMU, its HFI version and its
+  RPMh votes; the 618 is the first generation of the a6xx, with another GMU interface and other registers. A wrong write in
+  that sequence resets the phone (the driver's head says how it was found out on redwood). The way: a `ADRENO618` driver of
+  this device, step by step as the 642L's was, from Linux's `a6xx_gmu.c` / `a6xx_gpu.c` (the a618 paths) and this phone's
+  device tree; the firmware is pulled already (`fw-gpu/`: `a630_sqe.fw`, `a618_gmu.bin`, `a615_zap.*`). Until then the
+  screen is drawn by the CPU, and hakios-metal (built for the 642L) does not run here.
+- **Audio**: the SM7150's ADSP speaks APR to a WCD9375 codec, not the SC7280's services; `hakios.adsp.c` is that SoC's. The
+  DSP's image is pulled (`fw-audio/`); the PAS start of the DSP is the part that may carry over, the rest is new.
+- **Wi-Fi**: this phone's WCN3990 runs its firmware on the modem (Linux: ath10k over SNOC, the modem's WLAN service), so the
+  modem must run first; `hakios.wifi.c` drives a WCN6750 with its own DSP. The modem's image is pulled (`fw-modem/`);
+  `tools/soc-args.py` on the phone's own device tree (`adb pull /sys/firmware/fdt`) gives the `soc_*` the modem driver wants.
 
 Check with `tools/hakios-device.py check surya`.

@@ -46,6 +46,10 @@
  *   thermal_stop=<C>   stop the run at this temperature (0: never; 105)
  *   thermal_tm0=<pa>, thermal_tm1=<pa>  the two blocks' readings, when this is not the reference phone
  *                      (0xc263000 and 0xc265000)
+ *   thermal_table=2    a SoC whose sensors are not the reference phone's: every sensor of both blocks (16 each), named by
+ *                      block and number ("tsens0-03"), with no vendor limits of their own. The SM7150 family (the POCO X3
+ *                      NFC) has its two blocks at the same addresses and of the same kind (Linux: qcom,sm7150-tsens,
+ *                      tsens-v2); which sensor is which core is its device tree's, not yet put in a table here
  */
 #include <stdint.h>
 #include <kern/clock.h>
@@ -126,13 +130,22 @@ static const struct sensor_info {
 	{ "mdmss-3", 0xc265000, 10, 95000, 125000 },
 	{ "camera-0", 0xc265000, 11, 100000, 125000 },
 };
-#define NSENSORS        ((unsigned)(sizeof(sensors) / sizeof(sensors[0])))
+#define NREFERENCE      ((unsigned)(sizeof(sensors) / sizeof(sensors[0])))
 #define REFERENCE_TM0   0xc263000u
 #define REFERENCE_TM1   0xc265000u
+#define GENERIC_PER_TM  16                              /* a TSENS v2 block has at most 16 sensors */
+#define MAX_SENSORS     (2 * GENERIC_PER_TM)
+
+/* thermal_table=2: every sensor of both blocks by number ("tsens0-03"), for a SoC whose table is not here (the SM7150) */
+static struct sensor_info generic_sensors[MAX_SENSORS];
+static char generic_names[MAX_SENSORS][12];
+static const struct sensor_info *table = sensors;
+static unsigned nsensors = NREFERENCE;
+#define NSENSORS        nsensors
 
 static vm_offset_t tm_va[2];
 static uint32_t tm_pa[2] = { REFERENCE_TM0, REFERENCE_TM1 };
-static int32_t tenths[NSENSORS];                /* the last good reading; INT32_MIN: none yet */
+static int32_t tenths[MAX_SENSORS];                /* the last good reading; INT32_MIN: none yet */
 static uint32_t poll_ms = 2000, log_seconds = 60, stop_celsius = 105;
 static uint64_t last_log, reads;
 static int strikes, last_step;
@@ -140,7 +153,7 @@ static bool stopping;
 
 static int thermal_max_mc = -273000;
 static char thermal_hottest[16] = "";
-static char thermal_list[NSENSORS * 16 + 8];
+static char thermal_list[MAX_SENSORS * 16 + 8];
 static int thermal_reads_value;
 
 SYSCTL_INT(_kern_hakios, OID_AUTO, thermal_max_mc, CTLFLAG_RD | CTLFLAG_LOCKED, &thermal_max_mc, 0,
@@ -176,7 +189,7 @@ look(void)
 
 	list[0] = 0;
 	for (unsigned i = 0; i < NSENSORS; i++) {
-		uint32_t status = *(volatile uint32_t *)(tm_va[sensors[i].tm == REFERENCE_TM0 ? 0 : 1] + TM_STATUS(sensors[i].number));
+		uint32_t status = *(volatile uint32_t *)(tm_va[table[i].tm == REFERENCE_TM0 ? 0 : 1] + TM_STATUS(table[i].number));
 		int32_t value = (int32_t)(status << 20) >> 20;
 
 		if (!(status & TM_VALID) || value < TEMP_MIN_TENTHS || value > TEMP_MAX_TENTHS) {
@@ -189,8 +202,8 @@ look(void)
 			hot = i;
 		}
 		text_of(one, sizeof(one), value);
-		if (strlen(list) + strlen(sensors[i].name) + strlen(one) + 3 < sizeof(list)) {
-			strlcat(list, sensors[i].name, sizeof(list));
+		if (strlen(list) + strlen(table[i].name) + strlen(one) + 3 < sizeof(list)) {
+			strlcat(list, table[i].name, sizeof(list));
 			strlcat(list, "=", sizeof(list));
 			strlcat(list, one, sizeof(list));
 			strlcat(list, " ", sizeof(list));
@@ -202,7 +215,7 @@ look(void)
 		return;
 	}
 	strlcpy(thermal_list, list, sizeof(thermal_list));
-	strlcpy(thermal_hottest, sensors[hot].name, sizeof(thermal_hottest));
+	strlcpy(thermal_hottest, table[hot].name, sizeof(thermal_hottest));
 	thermal_max_mc = hottest * 100;
 
 	uint64_t now = mach_absolute_time(), seconds;
@@ -212,7 +225,7 @@ look(void)
 	seconds /= NSEC_PER_SEC;
 	if (step > last_step || last_log == 0 || (log_seconds != 0 && seconds >= log_seconds)) {
 		text_of(one, sizeof(one), hottest);
-		say("thermal: %u of %u sensors read; hottest %s at %s C; %s\n", good, NSENSORS, sensors[hot].name, one, thermal_list);
+		say("thermal: %u of %u sensors read; hottest %s at %s C; %s\n", good, NSENSORS, table[hot].name, one, thermal_list);
 		last_log = now;
 	}
 	last_step = step;
@@ -226,7 +239,7 @@ look(void)
 		stopping = true;
 		text_of(one, sizeof(one), hottest);
 		say("\n--- thermal: %s reads %s C, at or above thermal_stop=%u three times in a row: back to the loader ---\n",
-		    sensors[hot].name, one, stop_celsius);
+		    table[hot].name, one, stop_celsius);
 		hakios_var_save_on_return();
 		hakios_adreno_stop();
 		hakios_wifi_stop();
@@ -254,8 +267,18 @@ thermal_init(void)
 	if (!PE_parse_boot_argn("thermal", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
-	for (unsigned i = 0; i < NSENSORS; i++) {
+	for (unsigned i = 0; i < MAX_SENSORS; i++) {
 		tenths[i] = INT32_MIN;
+	}
+	/* boot-arg thermal_table=2: every sensor of both blocks by number, for a SoC that is not the reference phone's */
+	if (PE_parse_boot_argn("thermal_table", &value, sizeof(value)) && value == 2) {
+		for (unsigned i = 0; i < MAX_SENSORS; i++) {
+			snprintf(generic_names[i], sizeof(generic_names[i]), "tsens%u-%02u", i / GENERIC_PER_TM, i % GENERIC_PER_TM);
+			generic_sensors[i] = (struct sensor_info){ generic_names[i], i < GENERIC_PER_TM ? REFERENCE_TM0 : REFERENCE_TM1,
+				                                   i % GENERIC_PER_TM, 0, 0 };
+		}
+		table = generic_sensors;
+		nsensors = MAX_SENSORS;
 	}
 	(void)PE_parse_boot_argn("thermal_tm0", &tm_pa[0], sizeof(tm_pa[0]));
 	(void)PE_parse_boot_argn("thermal_tm1", &tm_pa[1], sizeof(tm_pa[1]));

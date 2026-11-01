@@ -216,6 +216,7 @@ static const struct { uint32_t id; const char *name; } known[] = {
 	{ 415, "SM8350" }, { 439, "SM8350" }, { 457, "SM8450" }, { 475, "SC7280 (SM7325, \"yupik\")" },
 	{ 487, "SC7280" }, { 497, "QCM6490" }, { 498, "QCS6490" }, { 483, "SM6350" }, { 434, "SM6350" },
 	{ 480, "SM7225" }, { 459, "SM7225" }, { 416, "SM8250" }, { 356, "SM8250" },
+	{ 365, "SM7150 (\"sdmmagpie\")" },             /* Linux's qcom,ids.h: QCOM_ID_SDMMAGPIE, the POCO X3 NFC's family */
 };
 
 static const char *

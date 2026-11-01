@@ -82,6 +82,7 @@ cam_shutter	k
 cam_vblank	k
 cc_fade	u
 cpufreq	k
+cpufreq_osm	k
 cpuload	k
 cpumask	l
 cpus	l
@@ -258,6 +259,7 @@ thermal	k
 thermal_log	k
 thermal_poll	k
 thermal_stop	k
+thermal_table	k
 thermal_tm0	k
 thermal_tm1	k
 torch	kl

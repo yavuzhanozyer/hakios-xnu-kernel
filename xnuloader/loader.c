@@ -593,8 +593,9 @@ static const struct platform platform_sm7150 = {
 	 * The SM7150 family (the POCO X3 NFC, surya, on Mu-Silicium's suryaPkg): known by UEFI's framebuffer at
 	 * 0x9C000000 ("Display Reserved" of its memory map). The GICv3 is where the SC7280's is (Linux's sm7150.dtsi,
 	 * and the ios-sweet port's device tree for this SoC); the cores are numbered in MPIDR's second affinity field as
-	 * redwood's are: 0-5 Cortex-A55s (1.8 GHz), 6-7 Cortex-A76s (2.3 GHz). The firmware's virtual watchdog and
-	 * charger protocols are redwood's (wdt_arm, charger_start) and are not asked for here.
+	 * redwood's are: 0-5 Cortex-A55s (1.8 GHz), 6-7 Cortex-A76s (2.3 GHz). The firmware's virtual watchdog is
+	 * redwood's hypervisor's (wdt_arm) and is not asked for here; the charger protocols are UEFI's (suryaPkg has
+	 * QcomChargerDxe and ChargerExDxe) and are read as on redwood (charger_start, charger_poll: only reads).
 	 */
 	.name = "sm7150", .io_base = 0x00400000, .io_size = 0x3FC00000,
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
@@ -2249,7 +2250,8 @@ charger_start(void)
 	static const efi_guid qcom_charger_guid = QCOM_CHARGER_GUID;
 	efi_status ex_status, qcom_status, init_status = 0;
 
-	if (charger_enabled || PLAT != &platform_redwood) {
+	/* the phones whose UEFI carries Qualcomm's charger drivers (redwoodPkg's, and Mu-Silicium's suryaPkg for the SM7150) */
+	if (charger_enabled || (PLAT != &platform_redwood && PLAT != &platform_sm7150)) {
 		return;
 	}
 	ex_status = BS->locate_protocol(&charger_ex_guid, NULL, (void **)&CHARGER_EX);

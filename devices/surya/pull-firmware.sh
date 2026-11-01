@@ -5,6 +5,9 @@
 #   fw-touch/novatek_ts_fw.bin   the NT36672C's firmware for the panel this phone has: the controller keeps none of its own
 #                                and is sent it after every reset (devices/surya/drivers/input/hakios.nt36672c.c);
 #                                userland/build.sh puts it into the image as fw/novatek_ts_fw.bin
+#   fw-gpu/, fw-audio/, fw-modem/  the Adreno 618's microcode and zap shader, the audio DSP's and the modem's images (the
+#                                Wi-Fi of this phone, a WCN3990, runs its firmware on the modem): pulled now so that they are
+#                                at hand; no driver of this device uses them yet (README.md, "Next")
 #
 # surya was made with two panels, and the touch firmware is the panel's: Tianma (novatek_ts_tianma_fw.bin) or Huaxing
 # (novatek_ts_huaxing_fw.bin). The panel is named on the kernel's command line (msm_drm.dsi_display0=...); Xiaomi's driver
@@ -13,6 +16,15 @@ set -e
 cd "$(dirname "$0")/../.."
 adb get-state >/dev/null
 mkdir -p fw-touch
+pull() { # DIR SOURCE...  (missing files are told, not fatal)
+	local dir=$1; shift
+	mkdir -p "$dir"
+	for f in "$@"; do adb pull "$f" "$dir/" >/dev/null 2>&1 || echo "pull-firmware.sh: $f: not on the phone"; done
+	echo "pull-firmware.sh: $dir: $(ls -1 "$dir" | wc -l | tr -d ' ') files"
+}
+pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin $(for i in mdt b00 b01 b02; do echo /vendor/firmware/a615_zap.$i; done)
+pull fw-audio /vendor/firmware_mnt/image/adsp.mdt $(for i in $(seq -w 0 20); do echo /vendor/firmware_mnt/image/adsp.b$i; done)
+pull fw-modem /vendor/firmware_mnt/image/modem.mdt $(for i in $(seq -w 0 30); do echo /vendor/firmware_mnt/image/modem.b$i; done)
 for f in novatek_ts_tianma_fw.bin novatek_ts_huaxing_fw.bin; do
 	adb pull "/vendor/firmware/$f" fw-touch/ >/dev/null 2>&1 || echo "pull-firmware.sh: /vendor/firmware/$f: not on the phone"
 done

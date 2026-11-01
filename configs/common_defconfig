@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 354 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 356 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -101,7 +101,7 @@ CONFIG_HAKIOS_WIFI=y
 # CONFIG_HAKIOS_NT36672C is not set
 
 #
-# CPU, memory and boot (21)
+# CPU, memory and boot (22)
 #
 
 # CPU cores the kernel uses, 1 to 8; one if not set
@@ -118,6 +118,9 @@ CONFIG_HAKIOS_WIFI=y
 
 # read by the patch to Apple's files (kernel)
 # CONFIG_APPLOG_NAME is not set
+
+# the SM7150 family's frequency hardware, two groups (cores 0-5, 6-7), not the EPSS (qcom-cpufreq-hw.c)
+# CONFIG_CPUFREQ_OSM is not set
 
 # every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py ...
 # CONFIG_CPULOAD is not set
@@ -899,7 +902,7 @@ CONFIG_MODEM_AGAIN=y
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_WDA_OFF is not set
 
-# read by hakios.mpss.c (kernel)
+# read by hakios.cpufreq.c, hakios.mpss.c (kernel)
 # CONFIG_SOC_CMD_DB is not set
 
 # read by hakios.ipa.c (kernel)
@@ -995,7 +998,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_TORCH_SECS is not set
 
 #
-# Chip, thermal and PMIC (10)
+# Chip, thermal and PMIC (11)
 #
 
 # read the chip's identity from the firmware's shared memory: kern.hakios.soc_* (SoC number, revision, board)
@@ -1021,6 +1024,9 @@ CONFIG_MODEM_AGAIN=y
 
 # a summary line this often (0: only on a rise; 60)
 # CONFIG_THERMAL_LOG is not set
+
+# every sensor of both blocks by number ("tsens0-03"), for a SoC whose table is not here (the SM7150)
+# CONFIG_THERMAL_TABLE is not set
 
 # read by hakios.thermal.c (kernel)
 # CONFIG_THERMAL_TM0 is not set
