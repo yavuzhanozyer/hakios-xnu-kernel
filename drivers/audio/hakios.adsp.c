@@ -295,7 +295,9 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
  * 2 November 2026: our partition at 0x861cf000; the image relocatable, linked at 0x93c00000, whole), and 3 to 5: the
  * always-on processor's mailbox (msgram 0xc300000 as the SC7280's, its doorbell bit 0 of the APCS IPC register),
  * TrustZone's PAS calls (image 1), the image written into 0x95700000. Steps 6 on (SMP2P, the start, GLINK) are the
- * SC7280's and are refused.
+ * SC7280's and are refused. Then 6 and 7: our SMP2P item, the DSP's rails (lcx.lvl, lmx.lvl from the command database at
+ * soc_cmd_db), "adsp: on" to the always-on processor, TrustZone's authenticate-and-reset, and the DSP's item watched in
+ * the shared memory; the doorbells rung through the APCS. Steps 8 on (GLINK, QRTR, APR) are refused for now.
  */
 static uint32_t sm7150;
 static uint32_t smem_phys = 0x80900000u;
@@ -652,6 +654,9 @@ static struct {
 static void
 doorbells(void)
 {
+	if (sm7150) {
+		return;         /* (no IPCC: the DSP's doorbells are interrupts there, not taken; the shared memory is looked at) */
+	}
 	for (unsigned i = 0; i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
@@ -701,6 +706,26 @@ ring_aop(void)
 		return;
 	}
 	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
+}
+
+/*
+ * The audio DSP's doorbells: IPCC client 3 on the SC7280; on the SM7150 bits of the APCS IPC register (surya's device
+ * tree: qcom,smp2p-adsp qcom,ipc <&apcs 0 26>, qcom,glink/adsp mboxes <&apcs 24>). What the DSP rings comes as an
+ * interrupt there, which this driver does not take: it looks at the shared memory instead (doorbells() counts nothing).
+ */
+#define APCS_ADSP_SMP2P         26
+#define APCS_ADSP_GLINK         24
+
+static void
+ring_dsp(uint32_t ipcc_signal)
+{
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << (ipcc_signal == IPCC_GLINK ? APCS_ADSP_GLINK : APCS_ADSP_SMP2P));
+		return;
+	}
+	need(&ipcc);
+	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | ipcc_signal);
 }
 
 /* Linux's qmp_open(), as hakios.wifi.c does it; what is done already is found done. Under the mailbox's lock. */
@@ -864,7 +889,10 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	char id[8] = { 0 };
 
 	if (cmd_db == NULL) {
-		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(CMD_DB_PHYS, CMD_DB_SIZE, VM_WIMG_WCOMB);
+		uint32_t cmd_db_phys = (uint32_t)CMD_DB_PHYS;
+
+		PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));     /* another SoC's (the SM7150's: 0x85f20000) */
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
 	}
 	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
 		printf("adsp: %u: the boot loader's command database is not there\n", step);
@@ -1362,7 +1390,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+		ring_dsp(IPCC_SMP2P);
 	}
 }
 
@@ -1400,7 +1428,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	snprintf(last_write, sizeof(last_write), "step %u asked the audio DSP to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1415,7 +1443,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
@@ -1440,8 +1468,10 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("adsp: %u: THE AUDIO DSP IS SHUT DOWN\n", step);
-	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	if (!sm7150) {
+		need(&ipcc);
+		wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	}
 	doorbells();
 	dsp_started = false;
 	mailbox_send("{class: image, res: load_state, name: adsp, val: off}");
@@ -1685,7 +1715,7 @@ step_our_item(void)
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
 	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("adsp: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -1723,12 +1753,14 @@ step_start(void)
 	have = dsp_words(&last);
 	announce("listen for the audio DSP's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
-	need(&ipcc);
-	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
-		put(&ipcc, "heard", IPCC_CLEAR, rang);
+	if (!sm7150) {
+		need(&ipcc);
+		for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
+			put(&ipcc, "heard", IPCC_CLEAR, rang);
+		}
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	}
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
 	if (!rails(384)) {
@@ -2023,7 +2055,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+	ring_dsp(IPCC_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2265,7 +2297,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+			ring_dsp(IPCC_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -3326,10 +3358,10 @@ hakios_adsp_init(void)
 	}
 	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
 		PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
-		if (last_step == 0 || last_step > 5) {
-			printf("adsp: the SM7150's audio DSP: only steps 1 to 5 are ported (read, the always-on processor's mailbox, "
-			    "TrustZone's check of the header, the image written): stopping after step 5\n");
-			last_step = 5;
+		if (last_step == 0 || last_step > 7) {
+			printf("adsp: the SM7150's audio DSP: only steps 1 to 7 are ported (up to the DSP started and its first words "
+			    "watched); stopping after step 7\n");
+			last_step = 7;
 		}
 	}
 	if (last_step == 0) {
