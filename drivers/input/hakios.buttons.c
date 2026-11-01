@@ -38,6 +38,13 @@
  *   4  read how the keys' inputs are set up, and what they say now
  *   5  watch them                                       (the default)
  *
+ * Another phone with the same arbiter: boot-args buttons_pon=<slave << 8 | peripheral> and
+ * buttons_volup=<the same> name the two peripherals, and buttons_pon_gen=2 says that the power-on
+ * block is the older, undivided kind (the PM6150's of the SM7150 phones: PON at 0x800 of slave 0,
+ * power in bit 0 of its status and volume down in bit 1, as Linux's qcom,pm8998-pon has it). The
+ * POCO X3 NFC (surya): buttons_pon=0x008 buttons_pon_gen=2 buttons_volup=0x4c1 (GPIO2 of the
+ * PM6150L, slave 4), the values the ios-sweet port read its keys with on that phone.
+ *
  * Register layouts: Linux drivers/spmi/spmi-pmic-arb.c (arbiter version 5),
  * drivers/input/misc/pm8941-pwrkey.c (the "pmk8350" kind), drivers/pinctrl/qcom/pinctrl-spmi-gpio.c,
  * and the phone's own device tree (qcom,spmi@c440000, pon_hlos@1300, gpio_keys).
@@ -134,6 +141,10 @@ struct peripheral {
 };
 static struct peripheral pon = { .name = "the PMK8350's power-on block", .id = 0x013 };          /* registers 0x1300 of slave 0 */
 static struct peripheral pin = { .name = "GPIO6 of the PM7325", .id = 0x18d };                   /* registers 0x8d00 of slave 1 */
+
+/* buttons_pon_gen: 3, the split block of the PMK8350 (the default); 2, the undivided one of the PM6150 and its like */
+static uint32_t pon_gen = 3;
+static uint8_t pon_power_bit, pon_resin_bit;
 
 /* How the reads have gone: said once a minute. */
 static struct {
@@ -233,6 +244,13 @@ find_channel(struct peripheral *p, uint32_t channels)
 #define PON_SUBTYPE_HLOS        0x09
 #define PON_KPDPWR              0x80            /* in the status and in the interrupt registers */
 #define PON_RESIN               0x40
+/* the undivided kind ("generation 2", pm8998-pon in Linux): one block, the keys in the low bits */
+#define PON_GEN2_SUBTYPE_FROM   0x01
+#define PON_GEN2_SUBTYPE_TO     0x08
+#define PON_GEN2_KPDPWR         0x01
+#define PON_GEN2_RESIN          0x02
+#define PON_KPDPWR_BIT          pon_power_bit
+#define PON_RESIN_BIT           pon_resin_bit
 
 /* a GPIO of the low or medium voltage kind */
 #define GPIO_TYPE               0x10
@@ -319,8 +337,8 @@ buttons_poll(void)
 	if (power.usable || volume_down.usable) {
 		problem = spmi_read(&pon, REG_RT_STATUS, &status, 1);
 		if (problem == NULL) {
-			button_look(&power, status & PON_KPDPWR);
-			button_look(&volume_down, status & PON_RESIN);
+			button_look(&power, status & PON_KPDPWR_BIT);
+			button_look(&volume_down, status & PON_RESIN_BIT);
 		} else if (said < 8) {
 			said++;
 			printf("buttons: reading %s: %s\n", pon.name, problem);
@@ -369,7 +387,8 @@ pon_inputs(void)
 	const char *problem;
 	uint8_t r[8], more[2];
 
-	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x1310 to 0x1319)\n", pon.name);
+	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x%02x10 to 0x%02x19)\n", pon.name,
+	    pon.id & 0xff, pon.id & 0xff);
 	problem = spmi_read(&pon, REG_RT_STATUS, r, 8);
 	if (problem == NULL) {
 		problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
@@ -379,12 +398,12 @@ pon_inputs(void)
 		return;
 	}
 	printf("buttons: power-on block: status %#x (power %s, volume down %s); interrupts: edge %#x, high %#x, low %#x, "
-	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & PON_KPDPWR) ? "HELD" : "released",
-	    (r[0] & PON_RESIN) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
+	    "enabled %#x, latched %#x, pending %#x\n", r[0], (r[0] & PON_KPDPWR_BIT) ? "HELD" : "released",
+	    (r[0] & PON_RESIN_BIT) ? "HELD" : "released", r[REG_INT_SET_TYPE - REG_RT_STATUS], r[REG_INT_POLARITY_HIGH - REG_RT_STATUS],
 	    r[REG_INT_POLARITY_LOW - REG_RT_STATUS], r[REG_INT_ENABLED - REG_RT_STATUS], more[0], more[1]);
 	power.usable = volume_down.usable = true;
-	power.last = r[0] & PON_KPDPWR;
-	volume_down.last = r[0] & PON_RESIN;
+	power.last = r[0] & PON_KPDPWR_BIT;
+	volume_down.last = r[0] & PON_RESIN_BIT;
 }
 
 /* Step 4 for the pin: it is volume up only if it is an input with a pull-up, and switched on. */
@@ -395,7 +414,8 @@ pin_input(void)
 	uint8_t c[8], status = 0;
 	unsigned mode, pull;
 
-	printf("buttons: next: read the setup and the level of %s (registers 0x8d40 to 0x8d47, 0x8d10)\n", pin.name);
+	printf("buttons: next: read the setup and the level of %s (registers 0x%02x40 to 0x%02x47, 0x%02x10)\n", pin.name,
+	    pin.id & 0xff, pin.id & 0xff, pin.id & 0xff);
 	problem = spmi_read(&pin, GPIO_REG_MODE, c, 8);
 	if (problem == NULL) {
 		problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
@@ -463,7 +483,11 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 	}
 
 	printf("buttons: step 3: the first transfers on the SPMI bus\n");
-	pon_known = identify(&pon, PON_TYPE, PON_SUBTYPE_HLOS, PON_SUBTYPE_HLOS);
+	if (pon_gen == 2) {
+		pon_known = identify(&pon, PON_TYPE, PON_GEN2_SUBTYPE_FROM, PON_GEN2_SUBTYPE_TO);
+	} else {
+		pon_known = identify(&pon, PON_TYPE, PON_SUBTYPE_HLOS, PON_SUBTYPE_HLOS);
+	}
 	pin_known = identify(&pin, GPIO_TYPE, GPIO_SUBTYPE_LV, GPIO_SUBTYPE_MV_VIN3);
 	if (steps < 4) {
 		goto out;
@@ -561,6 +585,48 @@ press_power_init(void)
 	    seconds + 10);
 }
 
+/*
+ * The two peripherals, if another phone's: buttons_pon=, buttons_volup= (slave << 8 | peripheral, 0x001 to 0xfff) and
+ * buttons_pon_gen=2|3. Anything else is refused and the POCO X5 Pro's are kept.
+ */
+static void
+buttons_peripherals(void)
+{
+	uint32_t id = 0, gen = 0;
+
+	/* boot-arg buttons_pon_gen=2: the power-on block is the undivided kind (PM6150: power in bit 0, volume down in bit 1) */
+	if (PE_parse_boot_argn("buttons_pon_gen", &gen, sizeof(gen))) {
+		if (gen == 2 || gen == 3) {
+			pon_gen = gen;
+		} else {
+			printf("buttons: buttons_pon_gen=%u is neither 2 nor 3: kept at %u\n", gen, pon_gen);
+		}
+	}
+	pon_power_bit = pon_gen == 2 ? PON_GEN2_KPDPWR : PON_KPDPWR;
+	pon_resin_bit = pon_gen == 2 ? PON_GEN2_RESIN : PON_RESIN;
+	/* boot-arg buttons_pon=N: the power-on block of another phone's PMIC, as slave << 8 | peripheral (surya: 0x008) */
+	if (PE_parse_boot_argn("buttons_pon", &id, sizeof(id))) {
+		if (id != 0 && id <= 0xfff) {
+			pon.id = (uint16_t)id;
+			pon.name = "the power-on block (buttons_pon)";
+		} else {
+			printf("buttons: buttons_pon=%#x is not slave << 8 | peripheral: kept at %#x\n", id, pon.id);
+		}
+	}
+	id = 0;
+	/* boot-arg buttons_volup=N: volume up's PMIC GPIO of another phone, as slave << 8 | peripheral (surya: 0x4c1) */
+	if (PE_parse_boot_argn("buttons_volup", &id, sizeof(id))) {
+		if (id != 0 && id <= 0xfff) {
+			pin.id = (uint16_t)id;
+			pin.name = "volume up's GPIO (buttons_volup)";
+		} else {
+			printf("buttons: buttons_volup=%#x is not slave << 8 | peripheral: kept at %#x\n", id, pin.id);
+		}
+	}
+	printf("buttons: power-on block %#x (generation %u: power bit %#x, volume down bit %#x), volume up %#x\n", pon.id,
+	    pon_gen, pon_power_bit, pon_resin_bit, pin.id);
+}
+
 void
 hakios_buttons_init(void)
 {
@@ -585,6 +651,7 @@ hakios_buttons_init(void)
 	if (steps == 0) {
 		return;
 	}
+	buttons_peripherals();
 	if (kernel_thread_start(buttons_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 350 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 354 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (25)
+# Drivers built in (26)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -96,6 +96,9 @@ CONFIG_HAKIOS_VIRTIO_BLK=y
 
 # Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
 CONFIG_HAKIOS_WIFI=y
+
+# the touch screen of the POCO X3 NFC: a Novatek NT36672C on SPI (QUPv3 SE0), its firmware sent over SPI from ... [hakios.nt36672c.c]
+# CONFIG_HAKIOS_NT36672C is not set
 
 #
 # CPU, memory and boot (21)
@@ -301,7 +304,7 @@ CONFIG_UFS=2
 # CONFIG_VIRTIO_BLK is not set
 
 #
-# Touch and buttons (10)
+# Touch and buttons (13)
 #
 
 # the touch screen, and the power and volume buttons
@@ -310,8 +313,17 @@ CONFIG_TOUCHSCREEN=y
 # read by hakios.buttons.c (kernel)
 # CONFIG_BUTTONS is not set
 
+# the power-on block of another phone's PMIC, as slave << 8 | peripheral (surya: 0x008)
+# CONFIG_BUTTONS_PON is not set
+
+# the power-on block is the undivided kind (PM6150: power in bit 0, volume down in bit 1)
+# CONFIG_BUTTONS_PON_GEN is not set
+
 # read by hakios.buttons.c (kernel)
 # CONFIG_BUTTONS_STEPS is not set
+
+# volume up's PMIC GPIO of another phone, as slave << 8 | peripheral (surya: 0x4c1)
+# CONFIG_BUTTONS_VOLUP is not set
 
 # a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the ...
 # CONFIG_PRESS_POWER is not set

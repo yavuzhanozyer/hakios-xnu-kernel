@@ -121,6 +121,13 @@ recover_phone() {
 	return 1
 }
 
+# Which phone: $DEVICE, else the .config's CONFIG_DEVICE (make surya_defconfig ...), else redwood.
+device() {
+	local d=${DEVICE:-}
+	[ -z "$d" ] && [ -f .config ] && d=$(sed -n 's/^CONFIG_DEVICE="\([a-z0-9_]*\)"$/\1/p' .config | head -1)
+	echo "${d:-redwood}"
+}
+
 # What the phone's bootloader starts the loader with: Project Silicium's UEFI (mkxnuimg.py) or HakiOS's U-Boot
 # (tools/mkubootimg.py, docs/u-boot.md). XL_FIRMWARE says which; without it, Silicium's when its image has been built
 # (it is made from the phone's own vendor drivers and is not in the repository), else U-Boot's.
@@ -128,7 +135,8 @@ firmware() {
 	case "${XL_FIRMWARE:-}" in
 	u-boot|silicium) echo "$XL_FIRMWARE"; return ;;
 	esac
-	if [ -f Mu-Silicium/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ] || [ -f devices/redwood/prebuilt/SILICIUM_UEFI.fd ]; then
+	local d; d=$(device)
+	if [ -f Mu-Silicium/Build/${d}Pkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ] || [ -f devices/$d/prebuilt/SILICIUM_UEFI.fd ]; then
 		echo silicium
 	else
 		echo u-boot
@@ -147,8 +155,8 @@ enter() {
 	esac
 	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null || { echo "xl: payload build failed"; return 1; }
 	case "$(firmware)" in
-	u-boot) tools/mkubootimg.py -d "${DEVICE:-redwood}" -l $L -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
-	*) ./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	u-boot) tools/mkubootimg.py -d "$(device)" -l $L -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	*) ./mkxnuimg.py -d "$(device)" -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
 	esac || { echo "xl: image build failed ($(firmware))"; return 1; }
 	# Right after the phone enters fastboot the first "boot" is sometimes not taken: try twice.
 	local try
