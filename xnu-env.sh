@@ -4,6 +4,10 @@
 DARWIN_REDWOOD=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export DARWIN_REDWOOD
 export XNU_HOST_OS=$(uname)
+# The C locale for everything the build runs. In a Turkish locale (tr_TR) sed's [A-Za-z] does not take a capital I, and
+# XNU's assym.s rule (osfmk/conf/Makefile.template) wrote "#define _NUM" for INTSTACK_SIZE, "PAGE_MAX_S_NUM" for
+# PAGE_MAX_SIZE ...: locore.s, data.s and start.s then did not assemble. Seen on Arch Linux with tr_TR.UTF-8.
+export LC_ALL=C
 # On macOS there is no theos: xnu-deps/setup.sh lays out xnu-deps/theos-mac like one (links to the
 # cctools of Xcode and to the iPhoneOS 16.5 SDK of github.com/theos/sdks).
 if [ "$XNU_HOST_OS" = Darwin ]; then
