@@ -108,6 +108,13 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
+/*
+ * boot-arg adreno_a618=1: the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
+ * of the a6xx: its clock controller at 0x5090000 (dt qcom,gpucc-sdmmagpie), the GPU at 0x5000000, the GMU at 0x506a000
+ * with an older interface to its firmware. Only what reads (steps 1 and 3) is ported so far: the steps after 3 are
+ * the 642L's and are refused, step 2 (fuses at another place) is left out. The command database is soc_cmd_db's.
+ */
+static uint32_t a618;
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
 static char last_write[96] = "nothing written";
 static bool quiet;                      /* repeating accesses that have been announced and seen to work: say nothing */
@@ -283,7 +290,7 @@ wait_for(struct block *b, uint32_t offset, uint32_t mask, uint32_t value, uint32
  * gcc-sc7280.c. The touch screen driver uses this controller too.
  */
 static struct block gcc = { "gcc", 0x00100000, 0x80000 };
-#define GCC_PLL_VOTE            0x52000         /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz) */
+#define GCC_PLL_VOTE            (a618 ? 0x52004 : 0x52000)      /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz); the SM7150's as the SDM845's (gcc-sdm845.c) */
 #define GCC_PLL_VOTE_GPU_DIV    (1u << 16)
 #define GCC_GPU_CFG_AHB_CBCR    0x71004
 #define GCC_GPU_MEMNOC_GFX_CBCR 0x7100c
@@ -329,7 +336,10 @@ rpmh_resource(const char *name, uint16_t *levels, unsigned *level_count)
 		*level_count = 0;
 	}
 	if (db == NULL) {
-		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);  /* memory, not registers */
+		uint32_t phys = (uint32_t)CMD_DB_PHYS;
+
+		PE_parse_boot_argn("soc_cmd_db", &phys, sizeof(phys));     /* another SoC's (the SM7150's: 0x85f20000) */
+		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(phys, CMD_DB_SIZE);  /* memory, not registers */
 	}
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		return 0;
@@ -395,7 +405,7 @@ step_outside(void)
 	get(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
 	get(&gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR);
 
-	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x80860000)");
+	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (the command database)");
 	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: VDD_GFX_LEVEL, PM8350C S7) */
 	show_rpmh_resource("cx.lvl");           /* the rail of the CX half, shared with most of the SoC */
 	show_rpmh_resource("mx.lvl");           /* memories */
@@ -494,7 +504,8 @@ step_gpucc(void)
 		return false;
 	}
 
-	announce("read the GPU's clock controller (0x3d90000) as it is: the first access to the GPU's part of the SoC");
+	announce(a618 ? "read the Adreno 618's clock controller (0x5090000) as it is: the first access to the GPU's part of the SoC" :
+	    "read the GPU's clock controller (0x3d90000) as it is: the first access to the GPU's part of the SoC");
 	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
@@ -3780,9 +3791,23 @@ hakios_adreno_init(void)
 		keep = 1;
 	}
 	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
+	if (PE_parse_boot_argn("adreno_a618", &a618, sizeof(a618)) && a618) {
+		gpucc.phys = 0x05090000;
+		skip_steps |= 1u << 2;                  /* the fuses: where the SM7150 keeps its speed bin is not known here */
+		if (last_step > 3 || by_itself) {
+			printf("adreno: the Adreno 618: only steps 1 and 3 are ported (they read; step 3 switches on the clock of "
+			    "the clock controller's registers); stopping after step 3\n");
+			last_step = 3;
+			by_itself = false;
+			keep = 0;
+		}
+	}
 	if (PE_parse_boot_argn("adreno_only", &only, sizeof(only)) && only > 0 && only <= STEPS) {
 		last_step = only;
 		skip_steps = ~(1u << only);
+	}
+	if (a618 && last_step > 3) {
+		last_step = 3;                          /* (adreno_only=N past 3: the same refusal) */
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));

@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 357 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 358 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -350,7 +350,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (74)
+# GPU and display (76)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -358,6 +358,9 @@ CONFIG_GPU=y
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO is not set
+
+# the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
+# CONFIG_ADRENO_A618 is not set
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO_BLIND is not set
@@ -556,6 +559,9 @@ CONFIG_GPU=y
 
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_STEP is not set
+
+# read by hakios.adreno.c, hakios.cpufreq.c, hakios.mpss.c (kernel)
+# CONFIG_SOC_CMD_DB is not set
 
 # kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
 # CONFIG_SURF_CLEAR is not set
@@ -773,7 +779,7 @@ CONFIG_WIFI=y
 # CONFIG_WIFI_WIDE is not set
 
 #
-# Cellular (53)
+# Cellular (52)
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
@@ -901,9 +907,6 @@ CONFIG_MODEM_AGAIN=y
 
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_WDA_OFF is not set
-
-# read by hakios.cpufreq.c, hakios.mpss.c (kernel)
-# CONFIG_SOC_CMD_DB is not set
 
 # read by hakios.ipa.c (kernel)
 # CONFIG_SOC_GSI_BASE is not set
