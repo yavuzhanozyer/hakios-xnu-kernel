@@ -1158,6 +1158,29 @@ step_firmware(void)
 		    first[1], first[2], first[3], count, size);
 		goto fail;
 	}
+	/*
+	 * A relocatable image (a segment with bit 27 of its flags, QCOM_MDT_RELOCATABLE: the SM7150's, linked at 0x93c00000
+	 * with its memory reserved at 0x95700000) goes where its memory is, each segment as far from the start as it is
+	 * from the lowest segment's address (Linux's qcom_mdt_load: mem_reloc). One that is not goes where it is linked.
+	 */
+	uint32_t base = ADSP_MEMORY, linked = ~0u;
+	bool relocatable = false;
+
+	for (uint32_t i = 0; size >= 52 + 32 * (uint64_t)count && i < count; i++) {
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+			continue;
+		}
+		relocatable |= (segment.flags & (1u << 27)) != 0;
+		linked = segment.paddr < linked ? segment.paddr : linked;
+	}
+	if (relocatable && linked != ~0u) {
+		base = linked;
+		if (base != ADSP_MEMORY) {
+			printf("adsp: %u: a relocatable image linked at %#x: loaded at %#x, where the DSP's memory is\n", step, base,
+			    ADSP_MEMORY);
+		}
+	}
 	for (uint32_t i = 0; i < count; i++) {
 		char name[16];
 
@@ -1168,6 +1191,7 @@ step_firmware(void)
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;
 		}
+		segment.paddr = segment.paddr - base + ADSP_MEMORY;     /* (where it goes) */
 		if (segment.paddr < ADSP_MEMORY || segment.file_size > segment.memory_size ||
 		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)ADSP_MEMORY + ADSP_MEMORY_SIZE) {
 			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
