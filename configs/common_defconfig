@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 358 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 359 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -582,7 +582,7 @@ CONFIG_GPU=y
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (32)
+# Audio and battery (33)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -620,6 +620,9 @@ CONFIG_SOUND=4
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_RETURN is not set
+
+# the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000, pas-id 1, its memory ...
+# CONFIG_ADSP_SM7150 is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_STEP is not set

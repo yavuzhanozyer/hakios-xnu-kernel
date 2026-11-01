@@ -19,6 +19,7 @@ adsp_listen	k
 adsp_new	k
 adsp_pause	k
 adsp_return	k
+adsp_sm7150	k
 adsp_step	k
 adsp_wait	k
 apfs_cheap	k

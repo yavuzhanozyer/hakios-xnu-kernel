@@ -287,7 +287,16 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the shared memory (hakios.wifi.c, step 1) --------------------------------------------------- */
 
-#define SMEM_PHYS               0x80900000UL
+/*
+ * boot-arg adsp_sm7150=1: the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000,
+ * pas-id 1, its memory reserved-memory pil_adsp_region@95700000 (30 MB), the shared memory at soc_smem (0x86000000).
+ * Its doorbells are not an IPCC's: the APCS's IPC register (syscon@17c0000c, qcom,smp2p-adsp's qcom,ipc bit 26) rings
+ * it, and it rings us with interrupts (SMP2P: SPI 0xac). Ported so far: steps 1 and 2, which read; the steps after 2
+ * are the SC7280's and are refused.
+ */
+static uint32_t sm7150;
+static uint32_t smem_phys = 0x80900000u;
+#define SMEM_PHYS               ((unsigned long)smem_phys)
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_ADSP               2               /* dt: qcom,remote-pid of qcom,smp2p-adsp and qcom,glink/adsp */
@@ -965,7 +974,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
-	announce("read our partition with the audio DSP in the shared memory (0x80900000), and its items");
+	announce("read our partition with the audio DSP in the shared memory, and its items");
 	show_partition();
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (443) is there: it has run since the phone was started", &words);
@@ -976,15 +985,17 @@ step_survey(void)
 	    smem_item(ITEM_SMP2P_OURS, &size) ? "there" : "not there", smem_item(478, &size) ? "there" : "NOT THERE",
 	    smem_item(479, &size) ? "there" : "NOT THERE", smem_item(480, &size) ? "there" : "not there (the DSP makes it)");
 	show_crash_reason();
-	need(&ipcc);
-	printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	if (!sm7150) {
+		need(&ipcc);
+		printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	}
 	return smem_partition(SMEM_US, SMEM_ADSP, &size, &size) != 0;
 }
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY             (sm7150 ? 0x95700000u : 0x86700000u)    /* dt: reserved-memory adsp@86700000 (surya: pil_adsp_region@95700000) */
+#define ADSP_MEMORY_SIZE        (sm7150 ? 0x01e00000u : 0x04000000u)
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
 
@@ -3271,6 +3282,13 @@ hakios_adsp_init(void)
 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
 		return;
+	}
+	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
+		PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
+		if (last_step == 0 || last_step > 2) {
+			printf("adsp: the SM7150's audio DSP: only steps 1 and 2 are ported (they read): stopping after step 2\n");
+			last_step = 2;
+		}
 	}
 	if (last_step == 0) {
 		/* all of it, on a thread of its own, and left up */
