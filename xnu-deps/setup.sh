@@ -161,10 +161,16 @@ stage1() {
 		cc -std=gnu11 -O2 -w -o host/bin/unifdef unifdef/unifdef.c
 	fi
 	# csh: XNU's SETUP/config/doconf is a csh script
+	# the system's own tcsh when it has one (Arch, Fedora, Debian: a package called tcsh); else built here. Built once,
+	# not in parallel: tc.const.h is generated from the sources while they compile, and with -jN files were compiled
+	# against half of it (sh.proc.c: STRsemisp, STRminus ... undeclared, seen on Arch Linux)
+	if [ ! -x host/bin/tcsh ] && command -v tcsh >/dev/null 2>&1; then
+		cp "$(command -v tcsh)" host/bin/tcsh
+	fi
 	if [ ! -x host/bin/tcsh ]; then
 		log "building tcsh"
-		(cd tcsh && ./configure --prefix="$XNUDEPS/host" && make -j$JOBS) > tcsh-build.log 2>&1 ||
-			die "tcsh did not build, see xnu-deps/tcsh-build.log"
+		(cd tcsh && ./configure --prefix="$XNUDEPS/host" && make -j1) > tcsh-build.log 2>&1 ||
+			die "tcsh did not build, see xnu-deps/tcsh-build.log (or install your distribution's tcsh package)"
 		cp tcsh/tcsh host/bin/tcsh
 	fi
 	link tcsh host/bin/csh
