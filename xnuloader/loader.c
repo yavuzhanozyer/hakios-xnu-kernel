@@ -588,6 +588,20 @@ static const struct platform platform_redwood = {
 	.small_cores = 0x0f,
 };
 
+static const struct platform platform_sm7150 = {
+	/*
+	 * The SM7150 family (the POCO X3 NFC, surya, on Mu-Silicium's suryaPkg): known by UEFI's framebuffer at
+	 * 0x9C000000 ("Display Reserved" of its memory map). The GICv3 is where the SC7280's is (Linux's sm7150.dtsi,
+	 * and the ios-sweet port's device tree for this SoC); the cores are numbered in MPIDR's second affinity field as
+	 * redwood's are: 0-5 Cortex-A55s (1.8 GHz), 6-7 Cortex-A76s (2.3 GHz). The firmware's virtual watchdog and
+	 * charger protocols are redwood's (wdt_arm, charger_start) and are not asked for here.
+	 */
+	.name = "sm7150", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x3f,
+};
+
 /* ------------------------------------------------------------------------ */
 
 static void
@@ -4345,6 +4359,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
+		} else if (SCREEN.base == 0x9C000000ULL) {
+			PLAT = &platform_sm7150;
 		} else {
 			ramfb_phone_screen();
 		}

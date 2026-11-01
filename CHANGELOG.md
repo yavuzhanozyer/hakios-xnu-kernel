@@ -16,6 +16,15 @@ changes to it; the scripts named fetch the release and put the changes on.
 - the build tools: Apple's [libdispatch](https://github.com/apple-oss-distributions/libdispatch), [libpthread](https://github.com/apple-oss-distributions/libpthread) and [AvailabilityVersions](https://github.com/apple-oss-distributions/AvailabilityVersions), [bootstrap_cmds](https://github.com/markmentovai/bootstrap_cmds), [unifdef](https://github.com/fanf2/unifdef), the [macOS 13.3 SDK](https://github.com/joseluisq/macosx-sdks) and the [iPhoneOS 16.5 SDK](https://github.com/theos/sdks) -- `xnu-deps/setup.sh`
 - not fetched by anything here: the Darwin 16.5 user space, which you lay out from your own IPSW (`sysimage/`), and the phone's own firmware, pulled from its Android (`fw-*`)
 
+## 2026-11-01
+
+- devices: the POCO X3 NFC (`surya`, SM7150-AC) in `devices/surya`, with a new SoC layer for the SM7150 family: `make surya_defconfig`
+- surya: the touch screen, a Novatek NT36672C on SPI with its firmware sent over SPI (`hakios.nt36672c.c`, from the ios-sweet port); `devices/surya/pull-firmware.sh` pulls the panel's firmware into `fw-touch/`
+- buttons: another phone's PMIC by boot-argument (`buttons_pon=`, `buttons_pon_gen=2`, `buttons_volup=`); surya's PM6150 / PM6150L
+- loader: the SM7150 known by UEFI's framebuffer at 0x9C000000 (`platform sm7150`: six small cores, two big)
+- mkxnuimg.py, xl: the device from `-d`, `$DEVICE` or the .config, the UEFI's place from the device's Mu-Silicium configuration; redwood as before
+- surya: UEFI platform (Mu-Silicium's suryaPkg with the XNU payload region); nothing of it run on the phone under HakiOS yet
+
 ## 2026-10-30
 
 - repositories: `main` is the branch of `hakios-xnu-kernel` -- what was `hakios` and then `u-boot`; `hakios` is gone, `git clone` needs no `-b`

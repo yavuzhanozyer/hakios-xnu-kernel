@@ -56,7 +56,10 @@ BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once, for t
 BT	arg	bt	User space	k	hakios.bt.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BUTTONS	arg	buttons	Touch and buttons	k	hakios.buttons.c	
+BUTTONS_PON	arg	buttons_pon	Touch and buttons	k	hakios.buttons.c	the power-on block of another phone's PMIC, as slave << 8 | peripheral (surya: 0x008)
+BUTTONS_PON_GEN	arg	buttons_pon_gen	Touch and buttons	k	hakios.buttons.c	the power-on block is the undivided kind (PM6150: power in bit 0, volume down in bit 1)
 BUTTONS_STEPS	arg	buttons_steps	Touch and buttons	k	hakios.buttons.c	
+BUTTONS_VOLUP	arg	buttons_volup	Touch and buttons	k	hakios.buttons.c	volume up's PMIC GPIO of another phone, as slave << 8 | peripheral (surya: 0x4c1)
 CA_VBL	arg	ca_vbl	User space	u	inject.c	CoreAnimation's frame clock from the display driver's refresh notifications
 CAENV	arg	caenv	User space	u	inject.c,inject_sb.c	CoreAnimation's switches here as in the window server (inject.c), set before QuartzCore reads them
 CAM_AFTER	arg	cam_after	Cameras	k	hakios.camera.c	

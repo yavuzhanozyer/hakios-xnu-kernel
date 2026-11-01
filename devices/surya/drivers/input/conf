@@ -1,0 +1,7 @@
+# devices/surya/drivers/input/conf: the POCO X3 NFC's own input drivers (the format of drivers/input/conf, docs/drivers-config.md).
+
+driver NT36672C
+	file    bsd/dev/hakios.nt36672c.c
+	default n
+	help    the touch screen of the POCO X3 NFC: a Novatek NT36672C on SPI (QUPv3 SE0), its firmware sent over SPI from
+	help    fw/novatek_ts_fw.bin (touchscreen=1). Its pins and clocks are surya's: no other phone builds it

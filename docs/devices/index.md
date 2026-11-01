@@ -9,6 +9,7 @@ Every device with a repository, and how far each part of it works. A device of y
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  |  |  |  | yes |  |
 | [POCO X5 Pro 5G](redwood.md) | `sc7280` | yes | yes | yes | yes | yes | yes | yes | partly | yes | yes | partly | yes | no | partly |  | partly |
+| [POCO X3 NFC](surya.md) | `sm7150` | partly | partly | partly | partly | no | partly | no | no | no | no |  | no | no | no |  | no |
 
 An empty cell is a part nobody has looked at on that device yet.
 
@@ -17,3 +18,4 @@ An empty cell is a part nobody has looked at on that device yet.
 | SoC | What | |
 |---|---|---|
 | `sc7280` | Qualcomm SC7280 family (SM7325 "Snapdragon 778G", QCM6490; "yupik", "kodiak") | carried by redwood (`devices/redwood/soc/`) |
+| `sm7150` | Qualcomm SM7150 family (Snapdragon 730/730G/732G, "sdmmagpie") | carried by surya (`devices/surya/soc/`) |

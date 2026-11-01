@@ -234,11 +234,14 @@ try:
           len(hc.SYMBOLS) >= 300 and len({s[0] for s in hc.SYMBOLS}) == len(hc.SYMBOLS), len(hc.SYMBOLS))
 
     # the drivers: compiled in, not arguments
+    # a device's own driver (devices/<name>/drivers/, `default n`: devices/surya's touch screen) is built by that device only
+    shared = [d for d in hc.DRIVERS if d.default == "y"]
     check("redwood builds every driver, and they give no argument",
-          all("CONFIG_%s=y" % d.symbol in open(cfg).read() for d in hc.DRIVERS) and len(hc.DRIVERS) >= 20 and
-          not any(x.startswith("hakios_") for x in args_of(run("args", "--config", cfg))), len(hc.DRIVERS))
+          all("CONFIG_%s=y" % d.symbol in open(cfg).read() for d in shared) and len(shared) >= 20 and
+          not any(x.startswith("hakios_") for x in args_of(run("args", "--config", cfg))), len(shared))
     built = hc.drivers_built({})
-    check("a configuration that names no driver builds them all (their default)", all(built.values()), built)
+    check("a configuration that names no driver builds them all (their default)",
+          all(built[d.symbol] for d in shared) and not any(built[d.symbol] for d in hc.DRIVERS if d.default == "n"), built)
     off = dict(hc.parse(cfg)[0])
     problems, _ = hc.check(dict(off, HAKIOS_ADSP="n"))
     check("a driver without one it requires is refused (SOUND without ADSP)", any("CONFIG_HAKIOS_SOUND requires CONFIG_HAKIOS_ADSP" in p for p in problems), problems)

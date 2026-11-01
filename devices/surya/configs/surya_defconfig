@@ -1,0 +1,5 @@
+# HakiOS defconfig for the POCO X3 NFC (surya, SM7150-AC, devices/surya): the common kernel, the SM7150 family's facts, and
+# this phone's own. Needs the touch screen's firmware pulled from your phone (devices/surya/pull-firmware.sh).
+#include common_defconfig
+#include sm7150.config
+#include surya.config

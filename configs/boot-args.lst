@@ -61,7 +61,10 @@ bootcpu	kl
 bt	k
 bt_again	k
 buttons	k
+buttons_pon	k
+buttons_pon_gen	k
 buttons_steps	k
+buttons_volup	k
 ca_vbl	u
 caenv	u
 cam	kl

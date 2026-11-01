@@ -418,6 +418,12 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 fi
+# ... and the touch controller's firmware of a phone whose controller keeps none of its own (the POCO X3 NFC's NT36672C,
+# devices/surya/drivers/input/hakios.nt36672c.c): the panel's novatek_ts_*_fw.bin, chosen by devices/surya/pull-firmware.sh
+if [ -f ../fw-touch/novatek_ts_fw.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-touch/novatek_ts_fw.bin root/fw/
+fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
