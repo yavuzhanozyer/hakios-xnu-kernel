@@ -17,8 +17,8 @@
 | Part | State | |
 |---|---|---|
 | display | works | UEFI's framebuffer (1080 x 2400 at 0x9c000000) through the loader: the lock screen, its clock going on (2 November 2026); drawn by the CPU |
-| touch | partly | NT36672C: the chip answers, its firmware runs (reset state 0xa0, 1080x2400), touches reach backboardd; they came 75 s late from a flood of moves, now limited (touch_move_px/_ms): to be seen again |
-| buttons | partly | power and volume read from the PM6150 / PM6150L, every press seen in the log (buttons_pon=0x008 buttons_pon_gen=2 buttons_volup=0x4c1); what iOS does with them waits on the same queue as the touches |
+| touch | works | Novatek NT36672C on SPI, its firmware sent over SPI: the lock screen unlocked by a swipe (CONFIG_HAKIOS_NT36672C, touchscreen=1; moves limited by touch_move_px/_ms), 2 November 2026 |
+| buttons | works | power and volume through the PM6150 / PM6150L, seen working in iOS (CONFIG_HAKIOS_BUTTONS, buttons_pon=0x008 buttons_pon_gen=2 buttons_volup=0x4c1), 2 November 2026 |
 | cpu | partly | 8 cores, the kernel on core 7 (cpus=8 bootcpu=7): to the lock screen in 2-3 minutes; the timer is INTID 19 here (vtimer_intid=19, the loader gives it); the clocks (cpufreq_osm=1) not yet run |
 | storage | partly | UFS read through the loader (ufs=2, UEFI's block devices): the loader's, not yet run on this phone |
 | gpu | no | Adreno 618 (a6xx gen 1, GMU with HFI v1): hakios.adreno.c is the 642L's; firmware pulled (fw-gpu/), no driver yet |
