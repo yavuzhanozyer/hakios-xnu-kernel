@@ -23,7 +23,7 @@
 | storage | partly | UFS read through the loader (ufs=2, UEFI's block devices): the loader's, not yet run on this phone |
 | gpu | no | Adreno 618 (a6xx gen 1, GMU with HFI v1): hakios.adreno.c is the 642L's; firmware pulled (fw-gpu/), no driver yet |
 | audio | no | the audio DSP (q6 ADSP, APR, WCD9375 codec) is not the SC7280's; firmware pulled (fw-audio/), no driver yet |
-| battery | partly | the level and the charger from UEFI's Qualcomm charger drivers, read by the loader (battery=1); charging is the firmware's: written, not yet run |
+| battery | partly | the level in iOS from UEFI's Qualcomm charger drivers, read by the loader (battery=1), seen 2 November 2026; charging under this kernel is the firmware's, not seen |
 | haptic | no |  |
 | camera | no |  |
 | wifi | no | WCN3990: its firmware runs on the modem (ath10k snoc), so the modem comes first; not the WCN6750 of hakios.wifi.c |

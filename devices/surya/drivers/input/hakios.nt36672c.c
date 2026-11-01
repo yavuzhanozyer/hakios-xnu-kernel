@@ -946,6 +946,30 @@ out:
 	thread_block(THREAD_CONTINUE_NULL);
 }
 
+/*
+ * On the way back to the loader (osfmk/arm64/loader_return.c, with the other processors stopped and interrupts off):
+ * the polling thread may have been stopped in the middle of an SPI transfer. The serial engine is told to give it up
+ * and is left idle, and the thread, should it ever run again, finds the driver dead. No printing here.
+ */
+void hakios_device_quiesce(void);
+
+void
+hakios_device_quiesce(void)
+{
+	nv.dead = true;
+	if (nv.se == 0) {
+		return;
+	}
+	if (nvt_rd(nv.se, SE_STATUS) & 1u) {
+		nvt_wr(nv.se, SE_CTRL, 2);              /* abort the command in flight (as nvt_abort) */
+		for (unsigned i = 0; i < 5000 && (nvt_rd(nv.se, SE_STATUS) & 1u); ++i) {
+			delay(1);
+		}
+	}
+	nvt_wr(nv.se, SE_IRQ_EN, 0);
+	nvt_wr(nv.se, SE_IRQ_CLR, 0xffffffffu);
+}
+
 static void
 nvt_init(void)
 {
