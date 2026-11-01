@@ -1,6 +1,7 @@
 #!/bin/bash
 # Pull the POCO X3 NFC's own firmware out of its Android into the fw-*/ directories at the top of the repository (never
-# committed: it is the vendor's). The phone is on adb, in Android (or in a recovery with /vendor mounted).
+# committed: it is the vendor's). The phone is on adb, in Android, or in a recovery with root adb (OrangeFox: mount /vendor
+# there first; the firmware partition this script mounts itself).
 #
 #   fw-touch/novatek_ts_fw.bin   the NT36672C's firmware for the panel this phone has: the controller keeps none of its own
 #                                and is sent it after every reset (devices/surya/drivers/input/hakios.nt36672c.c);
@@ -24,8 +25,25 @@ pull() { # DIR SOURCE...  (missing files are told, not fatal)
 	rmdir "$dir" 2>/dev/null || true        # nothing pulled: no empty directory for userland/build.sh to trip on
 }
 pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin /vendor/firmware/a630_gmu.bin $(for i in mdt b00 b01 b02; do echo /vendor/firmware/a615_zap.$i; done)
-pull fw-audio /vendor/firmware_mnt/image/adsp.mdt $(for i in $(seq -w 0 20); do echo /vendor/firmware_mnt/image/adsp.b$i; done)
-pull fw-modem /vendor/firmware_mnt/image/modem.mdt $(for i in $(seq -w 0 30); do echo /vendor/firmware_mnt/image/modem.b$i; done)
+# The DSPs' images are on the partition "modem" (FAT, NON-HLOS), which Android mounts at /vendor/firmware_mnt and a
+# recovery (OrangeFox) does not: there it is mounted here, read only, in a directory of its own, and unmounted again.
+img=/vendor/firmware_mnt/image
+mounted=
+if ! adb shell "[ -f $img/adsp.mdt ]" 2>/dev/null; then
+	part=$(adb shell 'for p in /dev/block/by-name/modem /dev/block/bootdevice/by-name/modem; do [ -e $p ] && { echo $p; break; }; done' | tr -d '\r')
+	if [ -n "$part" ] && adb shell "mkdir -p /tmp/hakios-fw && mount -t vfat -o ro $part /tmp/hakios-fw" 2>/dev/null; then
+		img=/tmp/hakios-fw/image
+		mounted=1
+		echo "pull-firmware.sh: the firmware partition ($part) mounted read only at /tmp/hakios-fw"
+	else
+		echo "pull-firmware.sh: no $img and the firmware partition could not be mounted (root adb, in a recovery?)"
+	fi
+fi
+pull fw-audio $img/adsp.mdt $(for i in $(seq -w 0 40); do echo $img/adsp.b$i; done)
+pull fw-modem $img/modem.mdt $(for i in $(seq -w 0 40); do echo $img/modem.b$i; done)
+# (the Wi-Fi's board data, beside the modem's image: for the day the WCN3990 has a driver)
+pull fw-wifi $img/bdwlan.bin $img/bdwlan.b0b $img/bdwlan.b0c $img/bdwlan.b0d $img/bdwlan.b0e $img/bdwlan.b0f
+[ -z "$mounted" ] || adb shell "umount /tmp/hakios-fw; rmdir /tmp/hakios-fw" 2>/dev/null || true
 for f in novatek_ts_tianma_fw.bin novatek_ts_huaxing_fw.bin; do
 	adb pull "/vendor/firmware/$f" fw-touch/ >/dev/null 2>&1 || echo "pull-firmware.sh: /vendor/firmware/$f: not on the phone"
 done
