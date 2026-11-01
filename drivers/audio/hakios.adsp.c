@@ -291,8 +291,11 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
  * boot-arg adsp_sm7150=1: the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000,
  * pas-id 1, its memory reserved-memory pil_adsp_region@95700000 (30 MB), the shared memory at soc_smem (0x86000000).
  * Its doorbells are not an IPCC's: the APCS's IPC register (syscon@17c0000c, qcom,smp2p-adsp's qcom,ipc bit 26) rings
- * it, and it rings us with interrupts (SMP2P: SPI 0xac). Ported so far: steps 1 and 2, which read; the steps after 2
- * are the SC7280's and are refused.
+ * it, and it rings us with interrupts (SMP2P: SPI 0xac). Ported so far: steps 1 and 2, which read (seen on the phone,
+ * 2 November 2026: our partition at 0x861cf000; the image relocatable, linked at 0x93c00000, whole), and 3 to 5: the
+ * always-on processor's mailbox (msgram 0xc300000 as the SC7280's, its doorbell bit 0 of the APCS IPC register),
+ * TrustZone's PAS calls (image 1), the image written into 0x95700000. Steps 6 on (SMP2P, the start, GLINK) are the
+ * SC7280's and are refused.
  */
 static uint32_t sm7150;
 static uint32_t smem_phys = 0x80900000u;
@@ -682,9 +685,21 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 	return rd(aoss.base + offset) == value;
 }
 
+/*
+ * The SM7150 has no IPCC: its doorbells are bits of the APCS's IPC register (syscon@17c0000c in surya's device tree):
+ * bit 0 the always-on processor's (qcom,qmp-aop@c300000, mboxes <&apcs 0>), bit 26 the audio DSP's SMP2P.
+ */
+static struct block apcs = { "apcs", 0x17c00000, 0x1000 };
+#define APCS_IPC                0x0c
+
 static void
 ring_aop(void)
 {
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << 0);
+		return;
+	}
 	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
 }
 
@@ -695,7 +710,9 @@ mailbox_open(void)
 	uint32_t box, size;
 
 	need(&aoss);
-	need(&ipcc);
+	if (!sm7150) {
+		need(&ipcc);
+	}
 	if (get(&aoss, "magic", QMP_MAGIC) != QMP_MAGIC_VALUE || get(&aoss, "version", QMP_VERSION) != 1) {
 		printf("adsp: %u: not a mailbox this knows\n", step);
 		return false;
@@ -3309,9 +3326,10 @@ hakios_adsp_init(void)
 	}
 	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
 		PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
-		if (last_step == 0 || last_step > 2) {
-			printf("adsp: the SM7150's audio DSP: only steps 1 and 2 are ported (they read): stopping after step 2\n");
-			last_step = 2;
+		if (last_step == 0 || last_step > 5) {
+			printf("adsp: the SM7150's audio DSP: only steps 1 to 5 are ported (read, the always-on processor's mailbox, "
+			    "TrustZone's check of the header, the image written): stopping after step 5\n");
+			last_step = 5;
 		}
 	}
 	if (last_step == 0) {
