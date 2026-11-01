@@ -29,9 +29,10 @@ pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin /vendor/f
 # recovery (OrangeFox) does not: there it is mounted here, read only, in a directory of its own, and unmounted again.
 img=/vendor/firmware_mnt/image
 mounted=
-if ! adb shell "[ -f $img/adsp.mdt ]" 2>/dev/null; then
+# (by what adb prints, not by its status: a recovery's adbd may not pass the command's status on, and OrangeFox's does not)
+if [ "$(adb shell "[ -f $img/adsp.mdt ] && echo yes" 2>/dev/null | tr -d '\r')" != yes ]; then
 	part=$(adb shell 'for p in /dev/block/by-name/modem /dev/block/bootdevice/by-name/modem; do [ -e $p ] && { echo $p; break; }; done' | tr -d '\r')
-	if [ -n "$part" ] && adb shell "mkdir -p /tmp/hakios-fw && mount -t vfat -o ro $part /tmp/hakios-fw" 2>/dev/null; then
+	if [ -n "$part" ] && [ "$(adb shell "mkdir -p /tmp/hakios-fw && mount -t vfat -o ro $part /tmp/hakios-fw && echo yes" 2>/dev/null | tr -d '\r')" = yes ]; then
 		img=/tmp/hakios-fw/image
 		mounted=1
 		echo "pull-firmware.sh: the firmware partition ($part) mounted read only at /tmp/hakios-fw"
