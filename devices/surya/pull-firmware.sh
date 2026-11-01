@@ -21,6 +21,7 @@ pull() { # DIR SOURCE...  (missing files are told, not fatal)
 	mkdir -p "$dir"
 	for f in "$@"; do adb pull "$f" "$dir/" >/dev/null 2>&1 || echo "pull-firmware.sh: $f: not on the phone"; done
 	echo "pull-firmware.sh: $dir: $(ls -1 "$dir" | wc -l | tr -d ' ') files"
+	rmdir "$dir" 2>/dev/null || true        # nothing pulled: no empty directory for userland/build.sh to trip on
 }
 pull fw-gpu /vendor/firmware/a630_sqe.fw /vendor/firmware/a618_gmu.bin $(for i in mdt b00 b01 b02; do echo /vendor/firmware/a615_zap.$i; done)
 pull fw-audio /vendor/firmware_mnt/image/adsp.mdt $(for i in $(seq -w 0 20); do echo /vendor/firmware_mnt/image/adsp.b$i; done)
