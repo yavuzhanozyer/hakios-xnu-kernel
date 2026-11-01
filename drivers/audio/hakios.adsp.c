@@ -1552,42 +1552,77 @@ segment_word(unsigned s, uint32_t at)
 	return word;
 }
 
+/* A byte of a segment: of its file, and zero past the file's end (as segment_word()). */
+static uint8_t
+segment_byte(unsigned s, uint32_t at)
+{
+	return at < image.segment[s].file_size ? image.segment[s].file[at] : 0;
+}
+
+/*
+ * A segment into the DSP's memory, or compared with it: eight bytes at a time where the address is a multiple of
+ * eight and eight bytes are left, one at a time elsewhere. The SC7280's images begin and end their segments at such
+ * multiples; the SM7150's do not (seen on surya, 2 November 2026), and the memory takes single bytes as well.
+ */
+static uint64_t
+segment_transfer(volatile uint8_t *memory, unsigned s, bool compare)
+{
+	uint32_t at = image.segment[s].at, size = image.segment[s].memory_size;
+	uint64_t wrong = 0;
+
+	for (uint32_t i = 0; i < size;) {
+		if (((at + i) & 7) == 0 && size - i >= 8) {
+			volatile uint64_t *word = (volatile uint64_t *)(memory + at + i);
+
+			if (compare) {
+				wrong += *word != segment_word(s, i);
+			} else {
+				*word = segment_word(s, i);
+			}
+			i += 8;
+		} else {
+			if (compare) {
+				wrong += memory[at + i] != segment_byte(s, i);
+			} else {
+				memory[at + i] = segment_byte(s, i);
+			}
+			i++;
+		}
+	}
+	return wrong;
+}
+
 static bool
 step_image(void)
 {
-	volatile uint64_t *dsp_memory;
+	volatile uint8_t *dsp_memory;
 	uint64_t written = 0, cleared = 0, wrong = 0;
+	char what[200];
 
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
-	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
+	snprintf(what, sizeof(what), "put the image's segments into the audio DSP's memory (%#x, %u MB: memory of nobody's until "
+	    "TrustZone starts the DSP), with zeroes where a segment is longer than its file, and read them back", ADSP_MEMORY,
+	    ADSP_MEMORY_SIZE >> 20);
+	announce(what);
+	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
 	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
 	for (unsigned s = 0; s < image.segments; s++) {
-		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
-
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if ((uint64_t)image.segment[s].at + image.segment[s].memory_size > ADSP_MEMORY_SIZE) {
+			printf("adsp: %u: segment %u goes past the DSP's memory: not written\n", step, s);
 			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
 			return false;
 		}
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
-			to[i / 8] = segment_word(s, i);
-		}
+		segment_transfer(dsp_memory, s, false);
 		written += image.segment[s].file_size;
 		cleared += image.segment[s].memory_size - image.segment[s].file_size;
 	}
 	settle();
 	for (unsigned s = 0; s < image.segments; s++) {
-		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
-
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
-			wrong += from[i / 8] != segment_word(s, i);
-		}
+		wrong += segment_transfer(dsp_memory, s, true);
 	}
-	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step,
+	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words or bytes differ\n", step,
 	    image.segments, written, cleared, wrong);
 	settle();
 	ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
