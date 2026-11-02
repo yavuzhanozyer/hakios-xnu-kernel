@@ -18,7 +18,7 @@ ADSP_LISTEN	arg	adsp_listen	Audio and battery	k	hakios.adsp.c
 ADSP_NEW	arg	adsp_new	Audio and battery	k	hakios.adsp.c	
 ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c	
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
-ADSP_SM7150	arg	adsp_sm7150	Audio and battery	k	hakios.adsp.c	the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000, pas-id 1, its memory reserved-memory
+ADSP_SM7150	arg	adsp_sm7150	Audio and battery	k	hakios.adsp.c,hakios.sound.c	the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000, pas-id 1, its memory reserved-memory
 ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
 ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
 APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	

@@ -200,7 +200,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adsp_new` | K | `hakios.adsp.c` | `CONFIG_ADSP_NEW` |  |
 | `adsp_pause` | K | `hakios.adsp.c` | `CONFIG_ADSP_PAUSE` |  |
 | `adsp_return` | K | `hakios.adsp.c` | `CONFIG_ADSP_RETURN` |  |
-| `adsp_sm7150` | K | `hakios.adsp.c` | `CONFIG_ADSP_SM7150` |  |
+| `adsp_sm7150` | K | `hakios.adsp.c`, `hakios.sound.c` | `CONFIG_ADSP_SM7150` |  |
 | `adsp_step` | K | `hakios.adsp.c` | `CONFIG_ADSP_STEP` |  |
 | `adsp_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_WAIT` |  |
 | `battery` | KL | `hakios.adsp.c`, `hakios.battery.c`, `loader.c` | `CONFIG_BATTERY` |  |

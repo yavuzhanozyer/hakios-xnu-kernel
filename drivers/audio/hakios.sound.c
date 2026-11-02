@@ -209,6 +209,27 @@ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
 #define CFG_8MA                 (3u << 6)
 #define CFG_OUTPUT              (1u << 9)
 
+/*
+ * boot-arg adsp_sm7150=1 (the POCO X3 NFC): the speakers' interface is TERTIARY MI2S, AFE port 0x1004, on GPIO 53 (bit
+ * clock), 54 (word clock), 55 and 56 (data) of the west tile (0x3500000), function 1 (ter_mi2s in Linux's pinctrl-sm7150.c),
+ * 8 mA; its bit clock 0x104 at 3.072 MHz and its I2S configuration as Android's mixer path has it (S24_LE, 48 kHz, stereo).
+ * Run that far by devices/surya/drivers/audio/hakios.tas256x.c (tas_probe=4): the DSP took all of it and both clocks
+ * toggled at the pins. The DSP sees our memory as stream 0x1b21 (surya's qcom,msm-audio-ion). The amplifiers are TI
+ * TAS2562s, not this file's: levels 3 and 4 are not for that phone yet.
+ */
+static uint32_t sm7150;
+
+static const struct {
+	unsigned pin;
+	const char *name;
+	uint32_t cfg, io;
+} mi2s_pins[] = {
+	{ 53, "gpio53 (TERT MI2S bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 54, "gpio54 (TERT MI2S word clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 55, "gpio55 (TERT MI2S data 0)", CFG_MI2S0 | CFG_8MA, 0 },
+	{ 56, "gpio56 (TERT MI2S data 1)", CFG_MI2S0 | CFG_8MA, 0 },
+};
+
 static const struct {
 	unsigned pin;
 	const char *name;
@@ -223,17 +244,22 @@ static const struct {
 static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
 static bool pins_taken;
 
+#define PIN(i)                  (sm7150 ? mi2s_pins[i] : tdm_pins[i])
+
 static void
 pins_on(void)
 {
+	if (sm7150) {
+		tlmm.phys = 0x03500000;         /* (the west tile, where the four are) */
+	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		found_cfg[i] = get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
-		found_io[i] = get(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin));
+		found_cfg[i] = get(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin));
+		found_io[i] = get(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin));
 	}
 	pins_taken = true;
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), tdm_pins[i].io);
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), tdm_pins[i].cfg);
+		put(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin), PIN(i).io);
+		put(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin), PIN(i).cfg);
 	}
 }
 
@@ -244,9 +270,9 @@ pins_off(void)
 		return;
 	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
-		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
+		put(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin), found_cfg[i]);
+		put(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin), found_io[i] & 2);
+		get(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin));
 	}
 	pins_taken = false;
 }
@@ -335,7 +361,7 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    (sm7150 ? 0x1004 : 0x9000)      /* PRI_TDM_RX_0; TERT_MI2S_RX on the SM7150 */
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
@@ -445,6 +471,25 @@ afe_on(void)
 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
 	uint16_t start[2] = { PORT, 0 };
 
+	if (sm7150) {
+		struct afe_clock_set mi2s_clock = { 1, 0x104 /* TER_MI2S_IBIT */, 48000 * 32 * 2, 1 /* couple no */, 0, 1 };
+		struct {
+			uint32_t version;
+			uint16_t bits, channel_mode, mono_stereo, ws_source;
+			uint32_t rate;
+			uint16_t data_format, reserved;
+		} __attribute__((packed)) i2s = { 1, 24, 1 /* SD0 */, 1 /* stereo */, 1 /* ours */, RATE, 0, 0 };
+
+		announce("the DSP is asked for TERT MI2S's bit clock, the port 0x1004 and its start (AFE)");
+		clock_on = afe_service_param("TERT MI2S's bit clock (0x104) at 3.072 MHz, on", AFE_MODULE_CLOCK_SET,
+		    AFE_PARAM_ID_CLOCK_SET, &mi2s_clock, sizeof(mi2s_clock));
+		if (!clock_on || !afe_port_param("the port 0x1004: I2S on SD0, stereo, 24 bits, 48 kHz, the word clock ours",
+		    AFE_MODULE_AUDIO_DEV_INTERFACE, 0x0001020du /* AFE_PARAM_ID_I2S_CONFIG */, &i2s, sizeof(i2s))) {
+			return false;
+		}
+		port_on = command("the port 0x1004, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start, sizeof(start), 0, NULL);
+		return port_on;
+	}
 	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
 	clock_on = afe_clock(true);
 	if (!clock_on) {
@@ -481,6 +526,12 @@ afe_off(void)
 		afe_service_param("the group 0x9100, off", AFE_MODULE_GROUP_DEVICE, AFE_PARAM_ID_GROUP_DEVICE_ENABLE, &disable,
 		    sizeof(disable));
 		group_on = false;
+	}
+	if (clock_on && sm7150) {
+		struct afe_clock_set off = { 1, 0x104, 48000 * 32 * 2, 1, 0, 0 };
+
+		afe_service_param("TERT MI2S's bit clock, off", AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &off, sizeof(off));
+		clock_on = false;
 	}
 	if (clock_on) {
 		afe_clock(false);
@@ -525,7 +576,7 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
 #define PTE_ADDRESS             0x0000fffffffff000ull
 #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as hakios.wifi.c's */
 
-#define AUDIO_STREAM            0x1801
+#define AUDIO_STREAM            (sm7150 ? 0x1b21 : 0x1801)      /* surya: iommus <&apps_smmu 0x1b21 0> */
 #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
 #define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
 
@@ -1417,14 +1468,15 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		hakios_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce(sm7150 ? "the TERT MI2S pins (GPIO 53 to 56) to the interface" :
+	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
 	}
 	sleep_ms(20);
-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
+	pin_activity(sm7150 ? 53 : 97, "the bit clock", &changes, &ones);
+	pin_activity(sm7150 ? 54 : 100, "the frame sync", &sync_changes, &sync_ones);
 	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
 	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
 	if (level == 1) {
@@ -1504,6 +1556,11 @@ hakios_sound_dsp_up(void)
 	}
 	if (level > 4) {
 		level = 4;
+	}
+	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150 && level > 2) {
+		say("sound: the SM7150 (adsp_sm7150=1): its amplifiers are TAS2562s, not this file's; level %u is level 2 here (the port "
+		    "and a stream with a tone, no amplifier)\n", level);
+		level = 2;
 	}
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
