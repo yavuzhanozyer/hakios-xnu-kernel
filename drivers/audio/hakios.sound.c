@@ -215,8 +215,9 @@ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
  * 8 mA; its bit clock 0x104 at 3.072 MHz and its I2S configuration as Android's mixer path has it (S24_LE, 48 kHz, stereo).
  * Run that far by devices/surya/drivers/audio/hakios.tas256x.c (tas_probe=4): the DSP took all of it and both clocks
  * toggled at the pins. The DSP sees our memory as stream 0x1b21 (surya's qcom,msm-audio-ion). The amplifiers are TI
- * TAS2562s, not this file's: level 3 drives the right one through devices/surya/drivers/audio/hakios.tas256x.c (the
- * left one's reset is the PM6150L's GPIO 8, not reached yet); level 4 is level 3 there.
+ * TAS2562s, not this file's: levels 3 and 4 drive the right one through devices/surya/drivers/audio/hakios.tas256x.c (the
+ * left one's reset is the PM6150L's GPIO 8, not reached yet). Its current and voltage sense are off, so it has no watch of
+ * its own (amp_monitor()); "Android's level" is, there, the amplifier's 0 dB.
  */
 static uint32_t sm7150;
 
@@ -226,6 +227,7 @@ extern bool hakios_tas256x_start(void) __attribute__((weak));
 extern bool hakios_tas256x_volume(uint32_t below, uint32_t step_ms) __attribute__((weak));
 extern bool hakios_tas256x_healthy(void) __attribute__((weak));
 extern void hakios_tas256x_stop(void) __attribute__((weak));
+extern void hakios_tas256x_release(void) __attribute__((weak));
 extern void hakios_tas256x_quiesce(void) __attribute__((weak));
 
 static bool
@@ -260,6 +262,7 @@ amp_healthy(void)
 	return sm7150 ? hakios_tas256x_healthy == NULL || hakios_tas256x_healthy() : hakios_speaker_healthy();
 }
 
+/* faded out and powered down, still set up (level 4 starts them again) */
 static void
 amp_stop(void)
 {
@@ -268,6 +271,24 @@ amp_stop(void)
 	} else if (hakios_tas256x_stop != NULL) {
 		hakios_tas256x_stop();
 	}
+}
+
+/* ... and let go of for good: the sound's end */
+static void
+amp_release(void)
+{
+	if (!sm7150) {
+		hakios_speaker_stop();
+	} else if (hakios_tas256x_release != NULL) {
+		hakios_tas256x_release();
+	}
+}
+
+/* the amplifiers' own watch (redwood's: temperature and battery); the TAS2562's sense is off here: nothing asked */
+static uint32_t
+amp_monitor(bool tell)
+{
+	return sm7150 ? 0 : hakios_speaker_monitor(tell);
 }
 
 struct pin_setting {
@@ -1384,10 +1405,10 @@ watch(void)
 			if (muted) {
 				guard_off(true);
 				if (on) {
-					hakios_speaker_stop();
+					amp_stop();
 					on = false;
 				}
-			} else if (on && !hakios_speaker_volume(below_with(extra), 1)) {
+			} else if (on && !amp_volume(below_with(extra), 1)) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1399,7 +1420,7 @@ watch(void)
 			say_when("Darwin plays: the amplifiers are started");
 			starts++;
 			darwin_peak = 0;
-			if (!hakios_speaker_start() || !hakios_speaker_volume(below_with(extra), 1)) {
+			if (!amp_start() || !amp_volume(below_with(extra), 1)) {
 				say("sound: THE AMPLIFIERS DID NOT START; Darwin's sound goes on to the DSP, unheard\n");
 				guard_off(true);
 				given_up = true;
@@ -1419,11 +1440,11 @@ watch(void)
 			say("sound: what Darwin wrote while they were on peaked at %u%% of full scale (%u)\n", darwin_peak * 100 / 32768,
 			    darwin_peak);
 			guard_off(false);
-			hakios_speaker_stop();
+			amp_stop();
 			on = false;
 		} else if (on && now - last_look >= 200000) {
 			last_look = now;
-			if (!hakios_speaker_healthy()) {
+			if (!amp_healthy()) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1432,7 +1453,7 @@ watch(void)
 				uint32_t wanted;
 
 				last_monitor = now;
-				wanted = hakios_speaker_monitor(monitor_looks++ % 10 == 0);
+				wanted = amp_monitor(monitor_looks++ % 10 == 0);
 				if (wanted != monitor) {
 					say("sound: the amplifiers' watch asks for %u.%03u dB less (it was %u.%03u)\n", wanted / 8, wanted % 8 * 125,
 					    monitor / 8, monitor % 8 * 125);
@@ -1466,7 +1487,7 @@ take_down(void)
 	lck_mtx_lock(&sound_lock);
 	if (running && !taken_down) {
 		taken_down = true;
-		amp_stop();
+		amp_release();
 		stream_off();
 		afe_off();
 		pins_off();
@@ -1539,8 +1560,9 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level == 4) {
 		thread_t feeder;
 
-		announce("the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
-		if (!hakios_speaker_prepare(acf, acf_size)) {
+		announce(sm7150 ? "the right amplifier (TAS2562 at 0x4c), set up, powered down until Darwin plays" :
+		    "the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
+		if (!amp_prepare(acf, acf_size)) {
 			goto out;
 		}
 		hakios_adsp_fw_free(acf, acf_size);
@@ -1608,11 +1630,7 @@ hakios_sound_dsp_up(void)
 	if (level > 4) {
 		level = 4;
 	}
-	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150 && level > 3) {
-		say("sound: the SM7150 (adsp_sm7150=1): what Darwin plays is not for it yet; level %u is level 3 here (the tone through "
-		    "the right amplifier)\n", level);
-		level = 3;
-	}
+	PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150));
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
 	PE_parse_boot_argn("sound_pause", &pause_ms, sizeof(pause_ms));

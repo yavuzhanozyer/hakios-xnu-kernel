@@ -642,6 +642,7 @@ bool hakios_tas256x_start(void);
 bool hakios_tas256x_volume(uint32_t below, uint32_t step_ms);
 bool hakios_tas256x_healthy(void);
 void hakios_tas256x_stop(void);
+void hakios_tas256x_release(void);
 void hakios_tas256x_quiesce(void);
 
 static bool amp_prepared, amp_on;
@@ -808,17 +809,26 @@ hakios_tas256x_healthy(void)
 	return true;
 }
 
+/* faded out and shut down; still set up, to be started again */
 void
 hakios_tas256x_stop(void)
 {
-	if (!amp_prepared) {
-		return;
-	}
 	if (amp_on) {
 		(void)hakios_tas256x_volume(TAS_MUTED, 20);
 		(void)amp_write("shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
 		amp_on = false;
+		say("tas256x: the amplifier faded out and shut down\n");
 	}
+}
+
+/* ... and its reset put back: the sound's end */
+void
+hakios_tas256x_release(void)
+{
+	if (!amp_prepared) {
+		return;
+	}
+	hakios_tas256x_stop();
 	say("tas256x: the amplifier shut down; its reset GPIO 91 put back (%#x)\n", gpio91_was);
 	wr(north_base + GPIO_IO(91), 0);
 	wr(north_base + GPIO_CFG(91), gpio91_was);
