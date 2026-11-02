@@ -18,7 +18,8 @@
  *   tas_probe=2   ... and the I2C engine: the GCC votes of its wrapper and itself (written: they switch clocks on, as
  *                 the touch screen's driver does for its engine), then its firmware's protocol, status and FIFO sizes
  *   tas_probe=3   ... and the amplifiers asked who they are: the engine's clock at 19.2 MHz (its RCG 0x183a8, as the
- *                 SDM845's wrapper 1 engine 3), its pins GPIO 46 and 47 to function 1 (qup13), the reset GPIO 91 let go
+ *                 SDM845's wrapper 1 engine 3), its pins GPIO 46 and 47 (north tile) to function 1 (qup13, as Linux's
+ *                 pinctrl-sm7150.c has it), the reset GPIO 91 (north) let go
  *                 (output, high), then at 0x4c and 0x4d: book 0 and page 0 chosen (registers 0x7f, 0x00) and the
  *                 revision (0x7d) read. The other amplifier's reset is GPIO 8 of the PM6150L: not touched here (a write
  *                 to a PMIC), so one of the two may not answer.
@@ -373,19 +374,19 @@ ask_amplifiers(void)
 		return;
 	}
 	/*
-	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. In the west tile, with their neighbours (the
-	 * touch screen's engine on 49-52, TERT MI2S on 53-56, 58: all west, seen). The other tiles are not read for them: a
-	 * tile answers only for its own pins, and a run that looked for 46 in the north one did not come back from it
-	 * (2 November 2026). There they read cfg 0 and level 0: no pull, and the bus low -- its pull-ups without power, or
-	 * not yet the engine's; the level is said again once they are.
+	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. Linux's pinctrl-sm7150.c: both in the NORTH
+	 * tile, qup13 their function 1 (and TERT MI2S 53-56 in the west, function 1 ter_mi2s; 91 north; 30 south: as seen).
+	 * Taken for west first, a write to 46 there reset the phone (2 November 2026): a tile has no registers for pins
+	 * that are not its own.
 	 */
-	say("tas256x: 3: the bus's pins in the west tile: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u\n", rd(west + GPIO_CFG(46)),
-	    rd(west + GPIO_IO(46)) & 1, rd(west + GPIO_CFG(47)), rd(west + GPIO_IO(47)) & 1);
-	gpio_set(west, 46, 1, 0, 0, false, false);
-	gpio_set(west, 47, 1, 0, 0, false, false);
+	say("tas256x: 3: the bus's pins in the north tile: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u\n", rd(north + GPIO_CFG(46)),
+	    rd(north + GPIO_IO(46)) & 1, rd(north + GPIO_CFG(47)), rd(north + GPIO_IO(47)) & 1);
+	gpio_set(north, 46, 1, 0, 0, false, false);
+	gpio_set(north, 47, 1, 0, 0, false, false);
 	delay_for_interval(1, NSEC_PER_MSEC);
 	say("tas256x: 3: now: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u (an idle bus with its pull-ups powered reads 1)\n",
-	    rd(west + GPIO_CFG(46)), rd(west + GPIO_IO(46)) & 1, rd(west + GPIO_CFG(47)), rd(west + GPIO_IO(47)) & 1);
+	    rd(north + GPIO_CFG(46)), rd(north + GPIO_IO(46)) & 1, rd(north + GPIO_CFG(47)), rd(north + GPIO_IO(47)) & 1);
+	(void)west;
 	say("tas256x: 3: the amplifiers' reset GPIO 91 let go: output, high\n");
 	gpio_set(north, 91, 0, 0, 0, true, true);
 	delay_for_interval(5, NSEC_PER_MSEC);
