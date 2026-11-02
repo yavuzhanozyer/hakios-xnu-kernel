@@ -24,6 +24,12 @@
  *                 revision (0x7d) read. The other amplifier's reset is GPIO 8 of the PM6150L: not touched here (a write
  *                 to a PMIC), so one of the two may not answer.
  *
+ *   tas_probe=4   ... and the interface, with the audio DSP up (adsp=1 adsp_sm7150=1, waited for): GPIO 53-56 to function 1
+ *                 (ter_mi2s), the DSP asked for TERT MI2S's bit clock (AFE clock 0x104, 3.072 MHz: 48 kHz, two slots of
+ *                 32 bits, as Android's machine driver has it for S24_LE), the port 0x1004 set up (I2S, SD0, stereo, 24
+ *                 bits, 48 kHz, its word clock ours) and started; then whether GPIO 53 and 54 toggle; held for
+ *                 tas_secs (3), stopped, everything put back. Nothing goes to the amplifiers: no sound.
+ *
  * The I2C transfers are the ios-sweet port's (xnu/patches/0060 and 0063, sweet_touch.c), run on this SoC's engine 7 there.
  *
  * Seen on the phone (tas_probe=2, 2 November 2026): GPIO 53-56 and 58 are in the west tile, 91 in the north, 30 in the
@@ -39,6 +45,7 @@
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
+#include <sys/hakios.audio.h>
 #include <sys/systm.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -415,6 +422,164 @@ ask_amplifiers(void)
 	}
 }
 
+/* ---- step 4: TERT MI2S, through the audio DSP -------------------------------------------------------------- */
+
+#define APR_SVC_AFE                     4
+#define APR_BASIC_RSP_RESULT            0x000110e8u
+#define AFE_PORT_CMD_DEVICE_START       0x000100e5u
+#define AFE_PORT_CMD_DEVICE_STOP        0x000100e6u
+#define AFE_PORT_CMD_SET_PARAM_V2       0x000100efu
+#define AFE_SVC_CMD_SET_PARAM           0x000100f3u
+#define AFE_MODULE_AUDIO_DEV_INTERFACE  0x0001020cu
+#define AFE_PARAM_ID_I2S_CONFIG         0x0001020du
+#define AFE_MODULE_CLOCK_SET            0x0001028fu
+#define AFE_PARAM_ID_CLOCK_SET          0x00010290u
+#define PORT_TERT_MI2S_RX               0x1004
+#define CLOCK_TER_MI2S_IBIT             0x104
+#define CLOCK_COUPLE_NO                 1
+#define MI2S_RATE                       48000
+#define MI2S_BIT_CLOCK                  (MI2S_RATE * 32 * 2)
+
+struct afe_param {
+	uint32_t module, param;
+	uint16_t size, reserved;
+} __attribute__((packed));
+
+struct afe_clock_set {
+	uint32_t version, id, hz;
+	uint16_t attribute, root;
+	uint32_t enable;
+} __attribute__((packed));
+
+struct afe_i2s {
+	uint32_t version;
+	uint16_t bits, channel_mode, mono_stereo, ws_source;
+	uint32_t rate;
+	uint16_t data_format, reserved;
+} __attribute__((packed));
+
+static bool
+afe_command(const char *what, uint32_t opcode, const void *payload, uint32_t length)
+{
+	struct hakios_apr_answer answer;
+
+	if (!hakios_adsp_apr(APR_SVC_AFE, 0, 0, opcode, payload, length, 1000, &answer)) {
+		say("tas256x: 4: %s: NO ANSWER from the DSP\n", what);
+		return false;
+	}
+	if (answer.opcode == APR_BASIC_RSP_RESULT && answer.words[0] == opcode) {
+		say("tas256x: 4: %s: %s %#x\n", what, answer.words[1] == 0 ? "done" : "REFUSED, error", answer.words[1]);
+		return answer.words[1] == 0;
+	}
+	say("tas256x: 4: %s: an answer not expected: opcode %#x %#x %#x\n", what, answer.opcode, answer.words[0], answer.words[1]);
+	return false;
+}
+
+/* A parameter: of the AFE as a whole (in band, port 0) or of a port. */
+static bool
+afe_param(const char *what, bool of_port, uint32_t module, uint32_t param, const void *data, uint16_t size)
+{
+	uint8_t packet[16 + sizeof(struct afe_param) + 32];
+	struct afe_param *p = (struct afe_param *)(packet + 16);
+
+	bzero(packet, sizeof(packet));
+	if (of_port) {
+		*(uint16_t *)packet = PORT_TERT_MI2S_RX;
+		*(uint16_t *)(packet + 2) = (uint16_t)(sizeof(*p) + size);
+	} else {
+		*(uint32_t *)packet = (uint32_t)sizeof(*p) + size;
+	}
+	p->module = module;
+	p->param = param;
+	p->size = size;
+	memcpy(packet + 16 + sizeof(*p), data, size);
+	return afe_command(what, of_port ? AFE_PORT_CMD_SET_PARAM_V2 : AFE_SVC_CMD_SET_PARAM, packet,
+	           16 + (uint32_t)sizeof(*p) + size);
+}
+
+static bool
+afe_clock(bool on)
+{
+	struct afe_clock_set clock = { 1, CLOCK_TER_MI2S_IBIT, MI2S_BIT_CLOCK, CLOCK_COUPLE_NO, 0, on };
+
+	return afe_param(on ? "TERT MI2S's bit clock (0x104) at 3.072 MHz, on" : "TERT MI2S's bit clock, off", false,
+	           AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+}
+
+static void
+toggles(vm_offset_t tile, unsigned pin, const char *name)
+{
+	uint32_t last = rd(tile + GPIO_IO(pin)) & 1, changes = 0, ones = 0;
+
+	for (uint32_t i = 0; i < 20000; i++) {
+		uint32_t now = rd(tile + GPIO_IO(pin)) & 1;
+
+		changes += now != last;
+		ones += now;
+		last = now;
+	}
+	say("tas256x: 4: gpio%u (%s): %u changes and %u ones in 20000 reads%s\n", pin, name, changes, ones,
+	    changes > 100 ? ": IT TOGGLES" : "");
+}
+
+static void
+interface_on(void)
+{
+	static const unsigned mi2s[] = { 53, 54, 55, 56 };
+	vm_offset_t west = ml_io_map(TLMM_WEST, 0x100000);
+	uint32_t was[4], secs = 3;
+	struct afe_i2s i2s = { .version = 1, .bits = 24, .channel_mode = 1 /* SD0 */, .mono_stereo = 1 /* stereo */,
+		               .ws_source = 1 /* ours */, .rate = MI2S_RATE, .data_format = 0 };
+	uint16_t start[2] = { PORT_TERT_MI2S_RX, 0 };
+	struct hakios_apr_answer answer;
+	bool clock_on = false, port_on = false;
+	unsigned waited;
+
+	PE_parse_boot_argn("tas_secs", &secs, sizeof(secs));
+	if (secs > 30) {
+		secs = 30;
+	}
+	/* the audio DSP's services: asked until they answer (adsp=1 brings them up beside the system's start) */
+	for (waited = 0; waited < 120; waited++) {
+		uint16_t nothing[2] = { PORT_TERT_MI2S_RX, 0 };      /* (our port, not started: a stop of it changes nothing) */
+
+		if (hakios_adsp_apr(APR_SVC_AFE, 0, 0, AFE_PORT_CMD_DEVICE_STOP, nothing, sizeof(nothing), 500, &answer)) {
+			break;
+		}
+		delay_for_interval(1000, NSEC_PER_MSEC);
+	}
+	if (waited == 120) {
+		say("tas256x: 4: the audio DSP's services do not answer after two minutes (adsp=1 adsp_sm7150=1?): stopping\n");
+		return;
+	}
+	say("tas256x: 4: the audio DSP answers (after %u s)\n", waited);
+	for (unsigned i = 0; i < 4; i++) {
+		was[i] = rd(west + GPIO_CFG(mi2s[i]));
+		/* function 1 (ter_mi2s), 8 mA, no pull; the clock and the frame sync output, as Android's active state */
+		gpio_set(west, mi2s[i], 1, 0, 3, i < 2, true);
+	}
+	clock_on = afe_clock(true);
+	if (clock_on && afe_param("the port 0x1004: I2S on SD0, stereo, 24 bits, 48 kHz, the word clock ours", true,
+	    AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
+		port_on = afe_command("the port 0x1004, started", AFE_PORT_CMD_DEVICE_START, start, sizeof(start));
+	}
+	if (port_on) {
+		toggles(west, 53, "TERT MI2S bit clock");
+		toggles(west, 54, "TERT MI2S frame sync");
+		say("tas256x: 4: held for %u s\n", secs);
+		delay_for_interval(secs * 1000, NSEC_PER_MSEC);
+		toggles(west, 53, "TERT MI2S bit clock");
+		afe_command("the port 0x1004, stopped", AFE_PORT_CMD_DEVICE_STOP, start, sizeof(start));
+	}
+	if (clock_on) {
+		afe_clock(false);
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		say("tas256x: 4: about to put gpio%u's configuration back: %#x\n", mi2s[i], was[i]);
+		wr(west + GPIO_CFG(mi2s[i]), was[i]);
+	}
+}
+
 static void
 probe_thread(void *parameter, __unused wait_result_t result)
 {
@@ -428,6 +593,9 @@ probe_thread(void *parameter, __unused wait_result_t result)
 	}
 	if (steps >= 3) {
 		ask_amplifiers();
+	}
+	if (steps >= 4) {
+		interface_on();
 	}
 	say("tas256x: the look is over\n");
 	thread_terminate(current_thread());
