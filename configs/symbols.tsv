@@ -207,7 +207,7 @@ ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root vo
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
 SMALL_CORES_AFTER	arg	small_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	
-SOC_CMD_DB	hex	soc_cmd_db	GPU and display	k	hakios.adreno.c,hakios.cpufreq.c,hakios.mpss.c	
+SOC_CMD_DB	hex	soc_cmd_db	GPU and display	k	hakios.adreno.c,hakios.adsp.c,hakios.cpufreq.c,hakios.mpss.c	
 SOC_GSI_BASE	hex	soc_gsi_base	Cellular	k	hakios.ipa.c	
 SOC_IMEM	hex	soc_imem	Cellular	k	hakios.mpss.c	
 SOC_IPA_BASE	hex	soc_ipa_base	Cellular	k	hakios.ipa.c	

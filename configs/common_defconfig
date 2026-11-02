@@ -563,7 +563,7 @@ CONFIG_GPU=y
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_STEP is not set
 
-# read by hakios.adreno.c, hakios.cpufreq.c, hakios.mpss.c (kernel)
+# read by hakios.adreno.c, hakios.adsp.c, hakios.cpufreq.c, hakios.mpss.c (kernel)
 # CONFIG_SOC_CMD_DB is not set
 
 # kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)

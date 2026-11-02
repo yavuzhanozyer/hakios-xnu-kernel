@@ -81,7 +81,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `rec_secs` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_SECS` |  |
 | `rec_start` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_START` |  |
 | `rec_step` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_STEP` |  |
-| `soc_cmd_db` | K | `hakios.adreno.c`, `hakios.cpufreq.c`, `hakios.mpss.c` | `CONFIG_SOC_CMD_DB` |  |
+| `soc_cmd_db` | K | `hakios.adreno.c`, `hakios.adsp.c`, `hakios.cpufreq.c`, `hakios.mpss.c` | `CONFIG_SOC_CMD_DB` |  |
 | `surf_clear` | K | `MiniIOSurface.cpp` | `CONFIG_SURF_CLEAR` |  |
 | `surf_wrap` | K | `MiniIOSurface.cpp` | `CONFIG_SURF_WRAP` |  |
 | `surftrace` | K | `MiniIOSurface.cpp` | `CONFIG_SURFTRACE` |  |
