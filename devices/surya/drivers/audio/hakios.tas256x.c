@@ -373,16 +373,24 @@ tas_read(uint8_t addr, uint8_t reg, uint8_t *value)
 	return error ? error : i2c_msg(addr, NULL, 0, value, 1, false);
 }
 
-static void
-ask_amplifiers(void)
-{
-	static const uint8_t addresses[2] = { 0x4c, 0x4d };
-	vm_offset_t west = ml_io_map(TLMM_WEST, 0x100000), north = ml_io_map(TLMM_NORTH, 0x100000);
+static bool bus_ready;
+static uint32_t gpio91_was;
+static vm_offset_t north_base;
 
+/* The I2C bus to the amplifiers: its clock, its pins, the amplifiers' reset let go, the engine set up (once a boot). */
+static bool
+bus_up(void)
+{
+	vm_offset_t north;
+
+	if (bus_ready) {
+		return true;
+	}
+	north = north_base = ml_io_map(TLMM_NORTH, 0x100000);
 	gcc_base = ml_io_map(GCC_PHYS, 0x80000);
 	se_base = ml_io_map(SE_PHYS, 0x4000);
 	if (!engine_clock()) {
-		return;
+		return false;
 	}
 	/*
 	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. Linux's pinctrl-sm7150.c: both in the NORTH
@@ -397,11 +405,23 @@ ask_amplifiers(void)
 	delay_for_interval(1, NSEC_PER_MSEC);
 	say("tas256x: 3: now: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u (an idle bus with its pull-ups powered reads 1)\n",
 	    rd(north + GPIO_CFG(46)), rd(north + GPIO_IO(46)) & 1, rd(north + GPIO_CFG(47)), rd(north + GPIO_IO(47)) & 1);
-	(void)west;
 	say("tas256x: 3: the amplifiers' reset GPIO 91 let go: output, high\n");
+	gpio91_was = rd(north + GPIO_CFG(91));
 	gpio_set(north, 91, 0, 0, 0, true, true);
 	delay_for_interval(5, NSEC_PER_MSEC);
 	if (!engine_init()) {
+		return false;
+	}
+	bus_ready = true;
+	return true;
+}
+
+static void
+ask_amplifiers(void)
+{
+	static const uint8_t addresses[2] = { 0x4c, 0x4d };
+
+	if (!bus_up()) {
 		return;
 	}
 	for (unsigned a = 0; a < 2; a++) {
@@ -579,6 +599,230 @@ interface_on(void)
 	for (unsigned i = 0; i < 4; i++) {
 		say("tas256x: 4: about to put gpio%u's configuration back: %#x\n", mi2s[i], was[i]);
 		wr(west + GPIO_CFG(mi2s[i]), was[i]);
+	}
+}
+
+/*
+ * ---- the right amplifier for hakios.sound.c (sound=3 adsp_sm7150=1) ---------------------------------------------------
+ *
+ * The TAS2562 at 0x4c, set up as Linux's mainline driver does (sound/soc/codecs/tas2562.c): a software reset; I2S
+ * (frame start on the word clock's falling edge, data one bit after it, sampled on the rising edge), 48 kHz, 24-bit
+ * words in 32-bit slots, the average of left and right (one amplifier, both channels of the tone); the current and
+ * voltage sense off (no speaker protection here: it is the DSP's under Android); powered up only while the port's
+ * clock runs. Its loudness is the digital volume (page 2, 0x0c-0x0f, 0x40000000 for 0 dB), 6 dB a step; "below" is
+ * eighths of a dB under 0 dB of that volume at the amplifier's own default level. The left one at 0x4d is held in
+ * reset by the PM6150L's GPIO 8 and stays silent.
+ */
+#define TAS_RIGHT               0x4c
+#define TAS_PAGE                0x00
+#define TAS_SW_RESET            0x01
+#define TAS_PWR_CTL             0x02
+#define TAS_PWR_ACTIVE          0x0c            /* mode 0 (active), the voltage and current sense powered down */
+#define TAS_PWR_SHUTDOWN        0x0e            /* mode 2 (shutdown), the same */
+#define TAS_TDM_CFG0            0x06
+#define TAS_TDM_CFG1            0x07
+#define TAS_TDM_CFG2            0x08
+#define TAS_INT_LTCH0           0x24            /* bit 0 over temperature, bit 1 over current */
+#define TAS_REV_ID              0x7d
+#define TAS_BOOK                0x7f
+#define TAS_DVC                 0x0c            /* page 2: the digital volume, four bytes, the high one first */
+#define TAS_MUTED               960             /* 120 dB under: the volume 0 */
+
+bool hakios_tas256x_prepare(void);
+bool hakios_tas256x_start(void);
+bool hakios_tas256x_volume(uint32_t below, uint32_t step_ms);
+bool hakios_tas256x_healthy(void);
+void hakios_tas256x_stop(void);
+void hakios_tas256x_quiesce(void);
+
+static bool amp_prepared, amp_on;
+static uint32_t amp_below = TAS_MUTED;
+
+static bool
+amp_write(const char *what, uint8_t reg, uint8_t value)
+{
+	int error = tas_write(TAS_RIGHT, reg, value);
+
+	if (error) {
+		say("tas256x: the amplifier: %s (%#x <- %#x): THE TRANSFER FAILED (%d)\n", what, reg, value, error);
+		return false;
+	}
+	return true;
+}
+
+static bool
+amp_read(uint8_t reg, uint8_t *value)
+{
+	int error = tas_read(TAS_RIGHT, reg, value);
+
+	if (error) {
+		say("tas256x: the amplifier: a read of %#x FAILED (%d)\n", reg, error);
+		return false;
+	}
+	return true;
+}
+
+static bool
+amp_volume_set(uint32_t below_now)
+{
+	static const uint32_t db[20] = {
+		0x40000000, 0x390a4160, 0x32d64618, 0x2d4efbd6, 0x28619aea, 0x23fd6678, 0x2013739e, 0x1c9676c7, 0x197a967f, 0x16b54338,
+		0x143d1362, 0x1209a37b, 0x10137988, 0x0e53ebb4, 0x0cc509ac, 0x0b618872, 0x0a24b063, 0x090a4d30, 0x080e9f97, 0x072e50a6,
+	};
+	uint32_t under = below_now / 8, value = 0;
+
+	if (below_now < TAS_MUTED) {
+		value = db[under % 20];
+		for (uint32_t tens = under / 20; tens; tens--) {
+			value /= 10;
+		}
+	}
+	if (!amp_write("page 2", TAS_PAGE, 2)) {
+		return false;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		if (!amp_write("the digital volume", (uint8_t)(TAS_DVC + i), (uint8_t)(value >> (24 - 8 * i)))) {
+			(void)amp_write("page 0", TAS_PAGE, 0);
+			return false;
+		}
+	}
+	amp_below = below_now;
+	return amp_write("page 0", TAS_PAGE, 0);
+}
+
+bool
+hakios_tas256x_prepare(void)
+{
+	uint8_t revision = 0, cfg0 = 0, cfg1 = 0, cfg2 = 0;
+
+	if (amp_prepared) {
+		return true;
+	}
+	if (!bus_up()) {
+		return false;
+	}
+	say("tas256x: the amplifier at %#x: reset, I2S at 48 kHz (24 bits in 32), left and right averaged, shut down, muted\n",
+	    TAS_RIGHT);
+	if (!amp_write("page 0", TAS_PAGE, 0) || !amp_write("book 0", TAS_BOOK, 0) || !amp_write("software reset", TAS_SW_RESET, 1)) {
+		return false;
+	}
+	delay_for_interval(2, NSEC_PER_MSEC);
+	if (!amp_write("page 0", TAS_PAGE, 0) || !amp_read(TAS_REV_ID, &revision)) {
+		return false;
+	}
+	if ((revision & 0xf0) != 0x10) {
+		say("tas256x: the amplifier's revision %#x is not a TAS2562's: not set up\n", revision);
+		return false;
+	}
+	if (!amp_write("shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN) || !amp_read(TAS_TDM_CFG0, &cfg0) ||
+	    !amp_read(TAS_TDM_CFG1, &cfg1) || !amp_read(TAS_TDM_CFG2, &cfg2)) {
+		return false;
+	}
+	say("tas256x: the amplifier after its reset: TDM configuration %#x %#x %#x\n", cfg0, cfg1, cfg2);
+	cfg0 = (uint8_t)((cfg0 & ~0x0fu) | 4u << 1 | 1);        /* 44.1/48 kHz; the frame starts high-to-low (I2S) */
+	cfg1 = (uint8_t)((cfg1 & ~0x3fu) | 1u << 1);            /* data one bit clock after the frame start, the rising edge */
+	cfg2 = (uint8_t)((cfg2 & ~0x3fu) | 3u << 4 | 2u << 2 | 2u);     /* (left + right) / 2; 24-bit words; 32-bit slots */
+	if (!amp_write("TDM configuration 0", TAS_TDM_CFG0, cfg0) || !amp_write("TDM configuration 1", TAS_TDM_CFG1, cfg1) ||
+	    !amp_write("TDM configuration 2", TAS_TDM_CFG2, cfg2) || !amp_volume_set(TAS_MUTED)) {
+		return false;
+	}
+	(void)amp_read(TAS_TDM_CFG0, &cfg0);
+	(void)amp_read(TAS_TDM_CFG1, &cfg1);
+	(void)amp_read(TAS_TDM_CFG2, &cfg2);
+	say("tas256x: the amplifier set up: TDM configuration %#x %#x %#x, shut down, muted\n", cfg0, cfg1, cfg2);
+	amp_prepared = true;
+	return true;
+}
+
+bool
+hakios_tas256x_start(void)
+{
+	uint8_t power = 0, latch = 0;
+
+	if (!amp_prepared) {
+		return false;
+	}
+	if (!amp_write("powered up, active", TAS_PWR_CTL, TAS_PWR_ACTIVE)) {
+		return false;
+	}
+	amp_on = true;
+	delay_for_interval(10, NSEC_PER_MSEC);
+	(void)amp_read(TAS_PWR_CTL, &power);
+	(void)amp_read(TAS_INT_LTCH0, &latch);
+	say("tas256x: the amplifier is on: power %#x, faults latched %#x\n", power, latch);
+	return true;
+}
+
+bool
+hakios_tas256x_volume(uint32_t below, uint32_t step_ms)
+{
+	if (!amp_prepared) {
+		return false;
+	}
+	if (below > TAS_MUTED) {
+		below = TAS_MUTED;
+	}
+	while (amp_below != below) {
+		uint32_t next = amp_below > below ? (amp_below - below > 48 ? amp_below - 48 : below) :
+		    (below - amp_below > 48 ? amp_below + 48 : below);
+
+		if (!amp_volume_set(next)) {
+			hakios_tas256x_quiesce();
+			return false;
+		}
+		if (amp_below != below) {
+			delay_for_interval(step_ms, NSEC_PER_MSEC);
+		}
+	}
+	say("tas256x: the amplifier's volume: %u.%03u dB under 0 dB\n", below / 8, below % 8 * 125);
+	return true;
+}
+
+bool
+hakios_tas256x_healthy(void)
+{
+	uint8_t latch = 0;
+
+	if (!amp_on) {
+		return true;
+	}
+	if (!amp_read(TAS_INT_LTCH0, &latch)) {
+		hakios_tas256x_quiesce();
+		return false;
+	}
+	if (latch & 3) {
+		say("tas256x: THE AMPLIFIER REPORTS A FAULT (%#x: %s%s): shut down\n", latch, (latch & 1) ? "over temperature " : "",
+		    (latch & 2) ? "over current" : "");
+		hakios_tas256x_quiesce();
+		return false;
+	}
+	return true;
+}
+
+void
+hakios_tas256x_stop(void)
+{
+	if (!amp_prepared) {
+		return;
+	}
+	if (amp_on) {
+		(void)hakios_tas256x_volume(TAS_MUTED, 20);
+		(void)amp_write("shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+		amp_on = false;
+	}
+	say("tas256x: the amplifier shut down; its reset GPIO 91 put back (%#x)\n", gpio91_was);
+	wr(north_base + GPIO_IO(91), 0);
+	wr(north_base + GPIO_CFG(91), gpio91_was);
+	amp_prepared = false;
+	bus_ready = false;
+}
+
+void
+hakios_tas256x_quiesce(void)
+{
+	if (amp_on) {
+		(void)tas_write(TAS_RIGHT, TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+		amp_on = false;
 	}
 }
 
