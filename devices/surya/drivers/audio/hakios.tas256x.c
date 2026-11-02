@@ -17,8 +17,17 @@
  *   tas_probe=1   every one of those pins' configuration and level, in each of the three tiles
  *   tas_probe=2   ... and the I2C engine: the GCC votes of its wrapper and itself (written: they switch clocks on, as
  *                 the touch screen's driver does for its engine), then its firmware's protocol, status and FIFO sizes
+ *   tas_probe=3   ... and the amplifiers asked who they are: the engine's clock at 19.2 MHz (its RCG 0x183a8, as the
+ *                 SDM845's wrapper 1 engine 3), its pins GPIO 46 and 47 to function 1 (qup13), the reset GPIO 91 let go
+ *                 (output, high), then at 0x4c and 0x4d: book 0 and page 0 chosen (registers 0x7f, 0x00) and the
+ *                 revision (0x7d) read. The other amplifier's reset is GPIO 8 of the PM6150L: not touched here (a write
+ *                 to a PMIC), so one of the two may not answer.
  *
- * Status: written, not yet run.
+ * The I2C transfers are the ios-sweet port's (xnu/patches/0060 and 0063, sweet_touch.c), run on this SoC's engine 7 there.
+ *
+ * Seen on the phone (tas_probe=2, 2 November 2026): GPIO 53-56 and 58 are in the west tile, 91 in the north, 30 in the
+ * south (each reads 0x1, pull-down, where it is, and 0 elsewhere); 58 and 30 read 1 (the amplifiers' interrupt lines
+ * held up: they have power); the engine has its I2C firmware (0x303), FIFOs of 16 and 32 words.
  */
 #include <kern/clock.h>
 #include <kern/startup.h>
@@ -26,6 +35,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <sys/errno.h>
 #include <sys/systm.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -129,6 +139,273 @@ look_at_engine(void)
 	    rd(se + SE_STATUS), rd(se + SE_HW_TX) >> 16 & 0x3f, rd(se + SE_HW_RX) >> 16 & 0x3f);
 }
 
+/* ---- step 3: the amplifiers asked who they are ---------------------------------------------------------- */
+
+#define TLMM_WEST               0x03500000
+#define TLMM_NORTH              0x03900000
+#define GCC_RCG_WRAP1_S3        0x183a8         /* gcc-sdm845.c: gcc_qupv3_wrap1_s3_clk_src */
+#define GCC_BRANCHES_WRAP1      { 0x18004, 0x18008, 0x1800c, 0x18010, 0x183a4 }
+#define SE_MCLK                 0x048
+#define SE_CLK_SEL              0x07c
+#define SE_DMA                  0x258
+#define SE_TX_LEN               0x26c
+#define SE_RX_LEN               0x270
+#define SE_SCL                  0x278
+#define SE_CMD                  0x600
+#define SE_CTRL                 0x604
+#define SE_IRQ                  0x610
+#define SE_IRQ_EN               0x614
+#define SE_IRQ_CLR              0x618
+#define SE_TX                   0x700
+#define SE_RX                   0x780
+#define SE_TX_COUNT             0x800
+#define SE_RX_COUNT             0x804
+#define SE_TX_WM                0x80c
+#define SE_RX_WM_IRQ            (1u << 26)
+#define SE_RX_LAST              (1u << 27)
+#define SE_TX_WM_IRQ            (1u << 30)
+#define SE_DONE                 (1u << 0)
+#define SE_NACK                 (1u << 10)
+#define SE_ERRORS               (0x3eu | (1u << 9) | (1u << 10) | (1u << 12) | (3u << 24) | (3u << 28))
+#define SE_EVENTS               (SE_DONE | SE_ERRORS | SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ)
+#define SE_PACK0                0x0007f8feu
+#define SE_PACK1                0x000ffefeu
+
+static vm_offset_t gcc_base, se_base;
+static bool se_dead;
+
+static bool
+wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
+{
+	for (unsigned i = 0; i < 5000; i++) {
+		if (!(rd(base + off) & mask)) {
+			return true;
+		}
+		delay(1);
+	}
+	return false;
+}
+
+static void
+gpio_set(vm_offset_t tile, unsigned pin, unsigned function, unsigned pull, unsigned drive_code, bool out, bool high)
+{
+	uint32_t cfg = rd(tile + GPIO_CFG(pin));
+
+	if (out) {
+		wr(tile + GPIO_IO(pin), high ? 2 : 0);
+	}
+	cfg = (cfg & ~0x3ffu) | function << 2 | pull | drive_code << 6 | (out ? 1u << 9 : 0);
+	say("tas256x: 3: about to write gpio%u's configuration: %#x\n", pin, cfg);
+	wr(tile + GPIO_CFG(pin), cfg);
+}
+
+static bool
+engine_clock(void)
+{
+	static const uint32_t branches[] = GCC_BRANCHES_WRAP1;
+	uint32_t cfg = rd(gcc_base + GCC_RCG_WRAP1_S3 + 4), dfs = rd(gcc_base + GCC_RCG_WRAP1_S3 + 0x14);
+
+	say("tas256x: 3: the engine's clock: command %#x, configuration %#x, DFS %#x\n", rd(gcc_base + GCC_RCG_WRAP1_S3), cfg, dfs);
+	if (dfs & 1) {
+		cfg = rd(gcc_base + GCC_RCG_WRAP1_S3 + 0x1c);
+		if ((cfg & 0x371f) != 1) {
+			say("tas256x: 3: its DFS level 0 (%#x) is not the crystal undivided: not changed, stopping\n", cfg);
+			return false;
+		}
+	} else {
+		cfg = (cfg & ~(0x371fu | 1u << 20)) | 1;        /* the crystal, divided by 1: 19.2 MHz */
+		say("tas256x: 3: about to set it to the crystal, 19.2 MHz: %#x\n", cfg);
+		wr(gcc_base + GCC_RCG_WRAP1_S3 + 4, cfg);
+		wr(gcc_base + GCC_RCG_WRAP1_S3, rd(gcc_base + GCC_RCG_WRAP1_S3) | 1);
+		if (!wait_clear(gcc_base, GCC_RCG_WRAP1_S3, 1)) {
+			say("tas256x: 3: the clock does not take it\n");
+			return false;
+		}
+	}
+	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
+		if (!wait_clear(gcc_base, branches[i], 1u << 31)) {
+			say("tas256x: 3: GCC's branch %#x stays off (%#x)\n", branches[i], rd(gcc_base + branches[i]));
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+engine_init(void)
+{
+	uint32_t rx = rd(se_base + SE_HW_RX);
+
+	if ((rd(se_base + SE_FW) >> 8 & 0xff) != 3 || (rd(se_base + SE_STATUS) & 0x1001)) {
+		say("tas256x: 3: the engine is not an idle I2C one (firmware %#x, status %#x)\n", rd(se_base + SE_FW),
+		    rd(se_base + SE_STATUS));
+		return false;
+	}
+	wr(se_base + 0xe18, 0);                 /* no GSI events */
+	wr(se_base + 0xe1c, 0);                 /* its interrupts not routed: its status is looked at */
+	wr(se_base + 0x644, 0);
+	wr(se_base + SE_IRQ_CLR, 0xffffffffu);
+	wr(se_base + 0x648, 0xffffffffu);
+	wr(se_base + SE_DMA, 0);
+	wr(se_base + 0x28, rd(se_base + 0x28) | 0x7f);
+	wr(se_base + 0xe30, rd(se_base + 0xe30) | 0x0f);
+	wr(se_base + 0x24, 0x7f);
+	wr(se_base + 0x20, 1);
+	wr(se_base + SE_CLK_SEL, 0);
+	wr(se_base + SE_MCLK, 7u << 4 | 1);     /* 19.2 MHz / 7 */
+	wr(se_base + SE_SCL, 10u << 20 | 11u << 10 | 26);       /* 100 kHz */
+	wr(se_base + 0x254, 0);
+	wr(se_base + 0x260, SE_PACK0);
+	wr(se_base + 0x264, SE_PACK1);
+	wr(se_base + 0x284, SE_PACK0);
+	wr(se_base + 0x288, SE_PACK1);
+	wr(se_base + SE_TX_WM, 0);
+	wr(se_base + 0x810, 0);
+	wr(se_base + 0x814, (rx >> 16 & 0x3f) - 1);
+	wr(se_base + SE_IRQ_EN, SE_EVENTS);
+	if ((rd(se_base + SE_TX_COUNT) & 0xfffffff) || (rd(se_base + SE_RX_COUNT) & 0x1ffffff)) {
+		say("tas256x: 3: the engine's FIFOs hold something already\n");
+		return false;
+	}
+	return true;
+}
+
+static void
+engine_abort(void)
+{
+	wr(se_base + SE_CTRL, 2);
+	for (unsigned i = 0; i < 5000 && !(rd(se_base + SE_IRQ) & (1u << 5)); i++) {
+		delay(1);
+	}
+	for (unsigned i = 0; i < 64 && (rd(se_base + SE_RX_COUNT) & 0x1ffffff); i++) {
+		(void)rd(se_base + SE_RX);
+	}
+	wr(se_base + SE_IRQ_CLR, 0xffffffffu);
+	if (!wait_clear(se_base, SE_STATUS, 1)) {
+		se_dead = true;
+	}
+}
+
+/* One message: a write of 1 to 3 bytes or a read of 1 to 32; stretch keeps the bus for a repeated start. */
+static int
+i2c_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, bool stretch)
+{
+	unsigned sent = 0, got = 0;
+
+	if (se_dead || nt > 3 || nr > 32 || (nt && nr) || (!nt && !nr) || !wait_clear(se_base, SE_STATUS, 1)) {
+		return EIO;
+	}
+	wr(se_base + SE_IRQ_CLR, 0xffffffffu);
+	wr(se_base + SE_TX_WM, nt ? 1 : 0);
+	wr(se_base + (nr ? SE_RX_LEN : SE_TX_LEN), nr ? nr : nt);
+	wr(se_base + SE_CMD, (nr ? 2u : 1u) << 27 | (uint32_t)addr << 9 | (stretch ? 4u : 0));
+	for (unsigned i = 0; i < 20000; i++) {
+		uint32_t irq = rd(se_base + SE_IRQ), count;
+
+		if (irq & SE_ERRORS) {
+			int error = (irq & SE_NACK) ? ENXIO : EIO;
+
+			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); j++) {
+				delay(1);
+				irq = rd(se_base + SE_IRQ);
+			}
+			if ((irq & SE_DONE) && !(rd(se_base + SE_STATUS) & 1)) {
+				wr(se_base + SE_IRQ_CLR, irq);
+				return error;
+			}
+			engine_abort();
+			return error;
+		}
+		if (nt && !sent && (irq & SE_TX_WM_IRQ)) {
+			uint32_t word = 0;
+
+			for (unsigned j = 0; j < nt; j++) {
+				word |= (uint32_t)tx[j] << (8 * j);
+			}
+			wr(se_base + SE_TX, word);
+			sent = nt;
+			wr(se_base + SE_TX_WM, 0);
+		}
+		count = rd(se_base + SE_RX_COUNT) & 0x1ffffff;
+		while (count-- && got < nr) {
+			uint32_t word = rd(se_base + SE_RX);
+
+			for (unsigned j = 0; j < 4 && got < nr; j++) {
+				rx[got++] = (uint8_t)(word >> (8 * j));
+			}
+		}
+		if (irq & SE_DONE) {
+			wr(se_base + SE_IRQ_CLR, irq);
+			return got == nr && sent == nt ? 0 : EIO;
+		}
+		wr(se_base + SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
+		delay(1);
+	}
+	engine_abort();
+	return ETIMEDOUT;
+}
+
+static int
+tas_write(uint8_t addr, uint8_t reg, uint8_t value)
+{
+	uint8_t data[2] = { reg, value };
+
+	return i2c_msg(addr, data, 2, NULL, 0, false);
+}
+
+static int
+tas_read(uint8_t addr, uint8_t reg, uint8_t *value)
+{
+	int error = i2c_msg(addr, &reg, 1, NULL, 0, true);
+
+	return error ? error : i2c_msg(addr, NULL, 0, value, 1, false);
+}
+
+static void
+ask_amplifiers(void)
+{
+	static const uint8_t addresses[2] = { 0x4c, 0x4d };
+	vm_offset_t west = ml_io_map(TLMM_WEST, 0x100000), north = ml_io_map(TLMM_NORTH, 0x100000);
+
+	gcc_base = ml_io_map(GCC_PHYS, 0x80000);
+	se_base = ml_io_map(SE_PHYS, 0x4000);
+	if (!engine_clock()) {
+		return;
+	}
+	/* qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull; in the west tile, if they read as there */
+	if (rd(west + GPIO_CFG(46)) == 0 && rd(west + GPIO_CFG(47)) == 0) {
+		say("tas256x: 3: GPIO 46 and 47 read 0 in the west tile: not where they were thought to be; stopping\n");
+		return;
+	}
+	say("tas256x: 3: the bus's pins as they were: gpio46 %#x, gpio47 %#x\n", rd(west + GPIO_CFG(46)), rd(west + GPIO_CFG(47)));
+	gpio_set(west, 46, 1, 0, 0, false, false);
+	gpio_set(west, 47, 1, 0, 0, false, false);
+	say("tas256x: 3: the amplifiers' reset GPIO 91 let go: output, high\n");
+	gpio_set(north, 91, 0, 0, 0, true, true);
+	delay_for_interval(5, NSEC_PER_MSEC);
+	if (!engine_init()) {
+		return;
+	}
+	for (unsigned a = 0; a < 2; a++) {
+		uint8_t revision = 0;
+		int error = tas_write(addresses[a], 0x00, 0);
+
+		if (!error) {
+			error = tas_write(addresses[a], 0x7f, 0);
+		}
+		if (!error) {
+			error = tas_read(addresses[a], 0x7d, &revision);
+		}
+		if (error) {
+			say("tas256x: 3: at %#x: %s (%d)\n", addresses[a], error == ENXIO ? "NO ANSWER (its reset may be the "
+			    "PM6150L's GPIO 8)" : "the transfer failed", error);
+		} else {
+			say("tas256x: 3: AT %#x AN AMPLIFIER ANSWERS: revision register 0x7d = %#x (%s)\n", addresses[a], revision,
+			    (revision & 0xf0) == 0x10 ? "TAS2562" : (revision & 0xf0) == 0x20 ? "TAS2564" : "not a revision this knows");
+		}
+	}
+}
+
 static void
 probe_thread(void *parameter, __unused wait_result_t result)
 {
@@ -139,6 +416,9 @@ probe_thread(void *parameter, __unused wait_result_t result)
 	look_at_pins();
 	if (steps >= 2) {
 		look_at_engine();
+	}
+	if (steps >= 3) {
+		ask_amplifiers();
 	}
 	say("tas256x: the look is over\n");
 	thread_terminate(current_thread());
