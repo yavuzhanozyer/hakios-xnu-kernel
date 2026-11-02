@@ -373,31 +373,19 @@ ask_amplifiers(void)
 		return;
 	}
 	/*
-	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. Which tile they are in: an I2C bus at rest is
-	 * held high by its pull-ups, so the tile where both read 1 at their input is theirs (their configuration may well
-	 * read 0 there, no pull being their reset state: seen in the west tile, 2 November 2026).
+	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. In the west tile, with their neighbours (the
+	 * touch screen's engine on 49-52, TERT MI2S on 53-56, 58: all west, seen). The other tiles are not read for them: a
+	 * tile answers only for its own pins, and a run that looked for 46 in the north one did not come back from it
+	 * (2 November 2026). There they read cfg 0 and level 0: no pull, and the bus low -- its pull-ups without power, or
+	 * not yet the engine's; the level is said again once they are.
 	 */
-	vm_offset_t bus_tile = 0;
-	unsigned found = 0;
-
-	for (unsigned t = 0; t < sizeof(tiles) / sizeof(tiles[0]); t++) {
-		vm_offset_t tile = ml_io_map(tiles[t].phys, 0x100000);
-		uint32_t in46 = rd(tile + GPIO_IO(46)) & 1, in47 = rd(tile + GPIO_IO(47)) & 1;
-
-		say("tas256x: 3: %s tile: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u\n", tiles[t].name, rd(tile + GPIO_CFG(46)), in46,
-		    rd(tile + GPIO_CFG(47)), in47);
-		if (in46 && in47) {
-			bus_tile = tile;
-			found++;
-		}
-	}
-	(void)west;
-	if (found != 1) {
-		say("tas256x: 3: the bus's pins are high in %u tiles, not in one: not touched; stopping\n", found);
-		return;
-	}
-	gpio_set(bus_tile, 46, 1, 0, 0, false, false);
-	gpio_set(bus_tile, 47, 1, 0, 0, false, false);
+	say("tas256x: 3: the bus's pins in the west tile: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u\n", rd(west + GPIO_CFG(46)),
+	    rd(west + GPIO_IO(46)) & 1, rd(west + GPIO_CFG(47)), rd(west + GPIO_IO(47)) & 1);
+	gpio_set(west, 46, 1, 0, 0, false, false);
+	gpio_set(west, 47, 1, 0, 0, false, false);
+	delay_for_interval(1, NSEC_PER_MSEC);
+	say("tas256x: 3: now: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u (an idle bus with its pull-ups powered reads 1)\n",
+	    rd(west + GPIO_CFG(46)), rd(west + GPIO_IO(46)) & 1, rd(west + GPIO_CFG(47)), rd(west + GPIO_IO(47)) & 1);
 	say("tas256x: 3: the amplifiers' reset GPIO 91 let go: output, high\n");
 	gpio_set(north, 91, 0, 0, 0, true, true);
 	delay_for_interval(5, NSEC_PER_MSEC);
