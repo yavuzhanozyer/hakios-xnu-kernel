@@ -389,6 +389,14 @@ bus_up(void)
 	north = north_base = ml_io_map(TLMM_NORTH, 0x100000);
 	gcc_base = ml_io_map(GCC_PHYS, 0x80000);
 	se_base = ml_io_map(SE_PHYS, 0x4000);
+	/* the clocks of wrapper 1 and its engine 3 voted for, as step 2 does: without it the engine's branch stays off */
+	if ((rd(gcc_base + GCC_VOTE) & (GCC_VOTE_WRAP1 | GCC_VOTE_WRAP1_S3)) != (GCC_VOTE_WRAP1 | GCC_VOTE_WRAP1_S3)) {
+		uint32_t vote = rd(gcc_base + GCC_VOTE) | GCC_VOTE_WRAP1 | GCC_VOTE_WRAP1_S3;
+
+		say("tas256x: 3: about to write GCC's vote register: %#x\n", vote);
+		wr(gcc_base + GCC_VOTE, vote);
+		delay_for_interval(10, NSEC_PER_MSEC);
+	}
 	if (!engine_clock()) {
 		return false;
 	}
