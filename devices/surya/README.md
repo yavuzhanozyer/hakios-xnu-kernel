@@ -75,6 +75,11 @@ Not yet, and why each needs the phone at hand, a step at a time, rather than cod
     54 (frame sync), 55 and 56 (data), function ter_mi2s, 8 mA; in place of redwood's PRI_TDM_RX_0 (`hakios.sound.c`)
   - the DSP reads our samples through the SMMU as stream 0x1b21 (qcom,msm-audio-ion, sid mask 0xf), not redwood's 0x1801
   - the codec WCD9375 (bolero, SoundWire) is for the earpiece, headset and microphones, not the loudspeakers
+  - Android's mixer paths (`/vendor/etc/mixer_paths_wcd9375.xml`, the card `sm6150-wcd9375-snd-card`): the path "speaker" is
+    TERT_MI2S_RX, two channels, S24_LE at 48 kHz; on the amplifiers "TAS256X RX MODE" Speaker, "ASI1 SEL" Left and Right,
+    "ASI Left/Right Switch" 1, "PLAYBACK VOLUME" 55 (52 for the factory test of one side), "Profile id" 0; the amplifiers'
+    voltage and current sense come back on TERT_MI2S_TX ("tas-iv-capture"). audio_platform_info.xml: the speaker is ACDB
+    device 15 (124 protected), 24 bits wide
 - **Wi-Fi**: this phone's WCN3990 runs its firmware on the modem (Linux: ath10k over SNOC, the modem's WLAN service), so the
   modem must run first; `hakios.wifi.c` drives a WCN6750 with its own DSP. The modem's image is pulled (`fw-modem/`);
   `tools/soc-args.py` on the phone's own device tree (`adb pull /sys/firmware/fdt`) gives the `soc_*` the modem driver wants.
