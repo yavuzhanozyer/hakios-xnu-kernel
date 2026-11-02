@@ -297,7 +297,10 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
  * TrustZone's PAS calls (image 1), the image written into 0x95700000. Steps 6 on (SMP2P, the start, GLINK) are the
  * SC7280's and are refused. Then 6 and 7: our SMP2P item, the DSP's rails (lcx.lvl, lmx.lvl from the command database at
  * soc_cmd_db), "adsp: on" to the always-on processor, TrustZone's authenticate-and-reset, and the DSP's item watched in
- * the shared memory; the doorbells rung through the APCS. Steps 8 on (GLINK, QRTR, APR) are refused for now.
+ * the shared memory; the doorbells rung through the APCS. Seen on the phone (2 November 2026): the image written and read
+ * back, TrustZone's authenticate-and-reset, "slave-kernel" 0x6 16 ms later (up, its own power asked for), GLINK's items
+ * 478 and 480 made by the DSP; asked to stop, it acknowledged in 14 ms and was shut down. Steps 8 to 11 (GLINK, QRTR,
+ * APR) as on the SC7280: the link's thread polls the shared memory and needs no doorbell from the DSP.
  */
 static uint32_t sm7150;
 static uint32_t smem_phys = 0x80900000u;
@@ -3393,11 +3396,9 @@ hakios_adsp_init(void)
 	}
 	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
 		PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
-		if (last_step == 0 || last_step > 7) {
-			printf("adsp: the SM7150's audio DSP: only steps 1 to 7 are ported (up to the DSP started and its first words "
-			    "watched); stopping after step 7\n");
-			last_step = 7;
-		}
+		/* all eleven steps: the link's thread looks at the shared memory every millisecond, doorbells or not */
+		printf("adsp: the SM7150's audio DSP (adsp_sm7150=1): its memory at %#x, the shared memory at %#x, doorbells through "
+		    "the APCS\n", ADSP_MEMORY, smem_phys);
 	}
 	if (last_step == 0) {
 		/* all of it, on a thread of its own, and left up */
