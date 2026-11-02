@@ -29,6 +29,8 @@
  * Seen on the phone (tas_probe=2, 2 November 2026): GPIO 53-56 and 58 are in the west tile, 91 in the north, 30 in the
  * south (each reads 0x1, pull-down, where it is, and 0 elsewhere); 58 and 30 read 1 (the amplifiers' interrupt lines
  * held up: they have power); the engine has its I2C firmware (0x303), FIFOs of 16 and 32 words.
+ * tas_probe=3 (2 November 2026): the bus's pins in the north tile, high at rest; with GPIO 91 let go, the amplifier at 0x4c
+ * (the right) answers: revision 0x10, a TAS2562; the one at 0x4d (the left) does not: its reset is the PM6150L's GPIO 8.
  */
 #include <kern/clock.h>
 #include <kern/startup.h>

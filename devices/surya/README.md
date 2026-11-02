@@ -74,6 +74,9 @@ Not yet, and why each needs the phone at hand, a step at a time, rather than cod
   - the interface: TERTIARY MI2S (`qcom,msm-dai-q6-mi2s-tert`, one RX line), AFE port 0x1004, pins GPIO 53 (bit clock),
     54 (frame sync), 55 and 56 (data), function ter_mi2s, 8 mA; in place of redwood's PRI_TDM_RX_0 (`hakios.sound.c`)
   - the DSP reads our samples through the SMMU as stream 0x1b21 (qcom,msm-audio-ion, sid mask 0xf), not redwood's 0x1801
+  - seen with `tas_probe=3`: the right amplifier (0x4c, reset GPIO 91) is a TAS2562 (revision 0x10) and answers on the bus
+    (GPIO 46/47, north tile, qup13); the left one (0x4d) waits on its reset, GPIO 8 of the PM6150L. Pins and functions as
+    Linux's pinctrl-sm7150.c has them: 46/47 north, 53-58 west (ter_mi2s function 1 on 53-56), 91 north, 30 south
   - the codec WCD9375 (bolero, SoundWire) is for the earpiece, headset and microphones, not the loudspeakers
   - Android's mixer paths (`/vendor/etc/mixer_paths_wcd9375.xml`, the card `sm6150-wcd9375-snd-card`): the path "speaker" is
     TERT_MI2S_RX, two channels, S24_LE at 48 kHz; on the amplifiers "TAS256X RX MODE" Speaker, "ASI1 SEL" Left and Right,
