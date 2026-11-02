@@ -105,6 +105,12 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 |---|---|---|---|---|---|---|
 | **`HAKIOS_WIFI`**<br>Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211 surface Darwin's wifid talks to. Needs fw-wifi/ from the phone | `hakios.wifi.c`<br>`hakios.wlfw.c`<br>`hakios.lx.c`<br>`hakios.sta.c`<br>`hakios.apple80211.c`<br>`hakios.wlan.cpp` | `HAKIOS_QMI` | `wifi=`, `wifi_again=`, `wifi_ask=`, `wifi_cal=`, `wifi_dirty=`, `wifi_file=`, `wifi_fine=`, `wifi_keep=` and 14 more |  | built |  | |
 
+## audio (devices/surya)
+
+| Driver | Files | Requires | Boot arguments | qemu | redwood | surya | |
+|---|---|---|---|---|---|---|
+| **`HAKIOS_TAS256X`**<br>the speakers' amplifiers of the POCO X3 NFC, two TI TAS256x on I2C, and their interface (TERT MI2S): step one, a look that only reads (tas_probe=N): the pins, the I2C engine. No other phone builds it | `hakios.tas256x.c` |  |  |  |  | built | |
+
 ## input (devices/surya)
 
 | Driver | Files | Requires | Boot arguments | qemu | redwood | surya | |

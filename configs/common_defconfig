@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 359 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 360 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (26)
+# Drivers built in (27)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -96,6 +96,9 @@ CONFIG_HAKIOS_VIRTIO_BLK=y
 
 # Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
 CONFIG_HAKIOS_WIFI=y
+
+# the speakers' amplifiers of the POCO X3 NFC, two TI TAS256x on I2C, and their interface (TERT MI2S): step one, a ... [hakios.tas256x.c]
+# CONFIG_HAKIOS_TAS256X is not set
 
 # the touch screen of the POCO X3 NFC: a Novatek NT36672C on SPI (QUPv3 SE0), its firmware sent over SPI from ... [hakios.nt36672c.c]
 # CONFIG_HAKIOS_NT36672C is not set
