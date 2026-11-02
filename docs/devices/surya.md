@@ -22,7 +22,7 @@
 | cpu | works | 8 cores, the kernel on core 7 (cpus=8 bootcpu=7; the timer is INTID 19 here, vtimer_intid=19 from the loader); the clocks through OSM: the small cores at 1804 MHz, the big at 2304 MHz (cpufreq=1 cpufreq_osm=1), 2 November 2026 |
 | storage | partly | UFS read through the loader (ufs=2, UEFI's block devices): the loader's, not yet run on this phone |
 | gpu | partly | Adreno 618: steps 1 to 6 of hakios.adreno.c ported (adreno=6 adreno_a618=1): CX on, the GMU's clock at 200 MHz, its always-on counter at 19.2 MHz, "THE GPU BLOCK IS ALIVE" (2 November 2026); the GMU's firmware, HFI and the 3D core not yet |
-| audio | no | the audio DSP (q6 ADSP, APR, WCD9375 codec) is not the SC7280's; firmware pulled (fw-audio/), no driver yet |
+| audio | partly | the audio DSP up and linked (adsp_step=11 adsp_sm7150=1, 2 November 2026): TrustZone starts it, GLINK and QRTR (node 5, 10 services), the APR audio services up; the speaker's path (TAS256x amplifier, WCD937x codec) not yet |
 | battery | partly | the level in iOS from UEFI's Qualcomm charger drivers, read by the loader (battery=1), seen 2 November 2026; charging under this kernel is the firmware's, not seen |
 | haptic | no |  |
 | camera | no |  |
