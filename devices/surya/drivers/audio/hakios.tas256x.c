@@ -372,14 +372,32 @@ ask_amplifiers(void)
 	if (!engine_clock()) {
 		return;
 	}
-	/* qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull; in the west tile, if they read as there */
-	if (rd(west + GPIO_CFG(46)) == 0 && rd(west + GPIO_CFG(47)) == 0) {
-		say("tas256x: 3: GPIO 46 and 47 read 0 in the west tile: not where they were thought to be; stopping\n");
+	/*
+	 * qupv3_se9_i2c_active: GPIO 46 and 47, function qup13, 2 mA, no pull. Which tile they are in: an I2C bus at rest is
+	 * held high by its pull-ups, so the tile where both read 1 at their input is theirs (their configuration may well
+	 * read 0 there, no pull being their reset state: seen in the west tile, 2 November 2026).
+	 */
+	vm_offset_t bus_tile = 0;
+	unsigned found = 0;
+
+	for (unsigned t = 0; t < sizeof(tiles) / sizeof(tiles[0]); t++) {
+		vm_offset_t tile = ml_io_map(tiles[t].phys, 0x100000);
+		uint32_t in46 = rd(tile + GPIO_IO(46)) & 1, in47 = rd(tile + GPIO_IO(47)) & 1;
+
+		say("tas256x: 3: %s tile: gpio46 cfg %#x in %u, gpio47 cfg %#x in %u\n", tiles[t].name, rd(tile + GPIO_CFG(46)), in46,
+		    rd(tile + GPIO_CFG(47)), in47);
+		if (in46 && in47) {
+			bus_tile = tile;
+			found++;
+		}
+	}
+	(void)west;
+	if (found != 1) {
+		say("tas256x: 3: the bus's pins are high in %u tiles, not in one: not touched; stopping\n", found);
 		return;
 	}
-	say("tas256x: 3: the bus's pins as they were: gpio46 %#x, gpio47 %#x\n", rd(west + GPIO_CFG(46)), rd(west + GPIO_CFG(47)));
-	gpio_set(west, 46, 1, 0, 0, false, false);
-	gpio_set(west, 47, 1, 0, 0, false, false);
+	gpio_set(bus_tile, 46, 1, 0, 0, false, false);
+	gpio_set(bus_tile, 47, 1, 0, 0, false, false);
 	say("tas256x: 3: the amplifiers' reset GPIO 91 let go: output, high\n");
 	gpio_set(north, 91, 0, 0, 0, true, true);
 	delay_for_interval(5, NSEC_PER_MSEC);
