@@ -26,17 +26,10 @@ for i in $(seq 1 2160); do s=$(./xl state); [ "$s" != absent ] && break; sleep 1
 echo "$(date +%T) phone: $s"; [ "$s" = absent ] && { echo "NO PHONE"; exit 1; }
 ./xl enter 2>&1 | tail -1
 ./xl ramdisk userland/system.apfs 2>&1 | tail -1
-# hv_wdt_pet=1: the kernel pets the SC7280 hypervisor's watchdog (SMC 0x86000007), which redwood's loader arms. Not on
-# surya (SM7150, an older hypervisor): its runs of 600 s went without it, and that call was never made there.
-HV_WDT=${HV_WDT-hv_wdt_pet=1}; [ "$_dev" = surya ] && HV_WDT=${HV_WDT_SURYA-}
-# -v on surya: the boot as text on its screen, as its runs have always had it (the log comes back either way)
-VERBOSE=""; [ "$_dev" = surya ] && VERBOSE="-v"
-XL_SB_DELAY=${XL_SB_DELAY:-600} XL_CMDLINE="debug=0x8 rd=md0 $VERBOSE $HV_WDT ${BASE_ARGS-bootcpu=7 cpus=8 cpufreq=1 ufs=2} $ARGS $SOC" XL_SECS=$SECS XL_FOLLOW=1 XL_FOLLOW_KEEP=1 ./xl run 2>&1 | tail -2
+XL_SB_DELAY=${XL_SB_DELAY:-600} XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 ${BASE_ARGS-bootcpu=7 cpus=8 cpufreq=1 ufs=2} $ARGS $SOC" XL_SECS=$SECS XL_FOLLOW=1 XL_FOLLOW_KEEP=1 ./xl run 2>&1 | tail -2
 echo "$(date +%T) state after run: $(./xl state)"
 L=$(ls -t logs/*-run.log.live | head -1); F=${L%.live}; echo "LOG=$F"
-# surya has no modem yet: what its run says of what it has instead (the arguments, the audio DSP, the speaker, a panic)
-[ "$_dev" = surya ] && cat $L $F 2>/dev/null | grep -a "^Boot args\|adsp: THE\|sound: \(LEVEL\|THE\|WHAT\|level\|Darwin\)\|tas256x: \(the amplifier is\|THE\)\|panic(" | sed 's/^\[ *[0-9.]*\]: //' | awk '!seen[$0]++' | cut -c1-230 | head -40
-cat $L $F 2>/dev/null | grep -a "mpss:\(7: \(THE\|the watch\)\|11\|rmtfs\|tftp\|servreg\|dms\|nas\|ipa: \(THE\|from node\|the modem\|a probe\)\|link: \(THE\|tftp\)\|LAST WORDS\|step 1[01]\)\|serving system\|panic(\|ipa: \|cell: \|net: en1\|wda: \|wds: \(THE\|the client\|about\)" | grep -v "about to ask\|about to tell" | sed 's/^\[ *[0-9.]*\]: //' | awk '!seen[$0]++' | cut -c1-230 | head -80
+cat $L $F 2>/dev/null | grep -a "mpss: \(7: \(THE\|the watch\)\|11\|rmtfs\|tftp\|servreg\|dms\|nas\|ipa: \(THE\|from node\|the modem\|a probe\)\|link: \(THE\|tftp\)\|LAST WORDS\|step 1[01]\)\|serving system\|panic(\|ipa: \|cell: \|net: en1\|wda: \|wds: \(THE\|the client\|about\)" | grep -v "about to ask\|about to tell" | sed 's/^\[ *[0-9.]*\]: //' | awk '!seen[$0]++' | cut -c1-230 | head -80
 # Where the phone is left (XL_END): "loader" (default) -- the kernel hands control back to our loader
 # at the end of the run (loader_return_after: the modem, the DSPs and the GPU stopped first), and the
 # phone stays there, in the loader's fastboot-protocol channel, ready for the next run with no reboot
