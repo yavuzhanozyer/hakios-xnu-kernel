@@ -37,6 +37,8 @@
  * held up: they have power); the engine has its I2C firmware (0x303), FIFOs of 16 and 32 words.
  * tas_probe=3 (2 November 2026): the bus's pins in the north tile, high at rest; with GPIO 91 let go, the amplifier at 0x4c
  * (the right) answers: revision 0x10, a TAS2562; the one at 0x4d (the left) does not: its reset is the PM6150L's GPIO 8.
+ * tas_probe=4 (2 November 2026): the DSP took the clock (0x104, 3.072 MHz), the port's I2S configuration and its start; GPIO 53
+ * toggled (6962 changes in 20000 reads) and GPIO 54 too (109): TERT MI2S runs.
  */
 #include <kern/clock.h>
 #include <kern/startup.h>
