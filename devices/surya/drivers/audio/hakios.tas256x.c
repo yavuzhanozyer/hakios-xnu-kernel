@@ -39,6 +39,7 @@
  * (the right) answers: revision 0x10, a TAS2562; the one at 0x4d (the left) does not: its reset is the PM6150L's GPIO 8.
  * tas_probe=4 (2 November 2026): the DSP took the clock (0x104, 3.072 MHz), the port's I2S configuration and its start; GPIO 53
  * toggled (6962 changes in 20000 reads) and GPIO 54 too (109): TERT MI2S runs.
+ * sound=3 adsp_sm7150=1 (3 November 2026): the test tone HEARD from the right speaker, through the amplifier code below.
  */
 #include <kern/clock.h>
 #include <kern/startup.h>

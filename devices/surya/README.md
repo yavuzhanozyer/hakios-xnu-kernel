@@ -77,6 +77,10 @@ Not yet, and why each needs the phone at hand, a step at a time, rather than cod
   - seen with `tas_probe=3`: the right amplifier (0x4c, reset GPIO 91) is a TAS2562 (revision 0x10) and answers on the bus
     (GPIO 46/47, north tile, qup13); the left one (0x4d) waits on its reset, GPIO 8 of the PM6150L. Pins and functions as
     Linux's pinctrl-sm7150.c has them: 46/47 north, 53-58 west (ter_mi2s function 1 on 53-56), 91 north, 30 south
+  - **heard on the phone (3 November 2026), the right speaker**: `adsp=1 adsp_sm7150=1 soc_smem=0x86000000
+    soc_cmd_db=0x85f20000 sound=3` plays the 1 kHz test tone through the TAS2562 at 0x4c (set up as Linux's mainline
+    tas2562.c does: I2S, 48 kHz, 24 bits in 32, left and right averaged), 30 dB under its 0 dB by default (`sound_below=N`,
+    eighths of a dB). Left to do: the left amplifier (its reset on the PM6150L's GPIO 8) and level 4, what Darwin plays
   - the codec WCD9375 (bolero, SoundWire) is for the earpiece, headset and microphones, not the loudspeakers
   - Android's mixer paths (`/vendor/etc/mixer_paths_wcd9375.xml`, the card `sm6150-wcd9375-snd-card`): the path "speaker" is
     TERT_MI2S_RX, two channels, S24_LE at 48 kHz; on the amplifiers "TAS256X RX MODE" Speaker, "ASI1 SEL" Left and Right,
