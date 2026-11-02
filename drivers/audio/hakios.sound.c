@@ -219,22 +219,20 @@ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
  */
 static uint32_t sm7150;
 
-static const struct {
+struct pin_setting {
 	unsigned pin;
 	const char *name;
-	uint32_t cfg, io;
-} mi2s_pins[] = {
+	uint32_t cfg, io;               /* Android's active state */
+};
+
+static const struct pin_setting mi2s_pins[] = {
 	{ 53, "gpio53 (TERT MI2S bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 54, "gpio54 (TERT MI2S word clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 55, "gpio55 (TERT MI2S data 0)", CFG_MI2S0 | CFG_8MA, 0 },
 	{ 56, "gpio56 (TERT MI2S data 1)", CFG_MI2S0 | CFG_8MA, 0 },
 };
 
-static const struct {
-	unsigned pin;
-	const char *name;
-	uint32_t cfg, io;               /* Android's active state */
-} tdm_pins[] = {
+static const struct pin_setting tdm_pins[] = {
 	{ 97, "gpio97 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
