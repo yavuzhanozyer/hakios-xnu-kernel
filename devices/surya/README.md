@@ -66,8 +66,15 @@ Not yet, and why each needs the phone at hand, a step at a time, rather than cod
   this device, step by step as the 642L's was, from Linux's `a6xx_gmu.c` / `a6xx_gpu.c` (the a618 paths) and this phone's
   device tree; the firmware is pulled already (`fw-gpu/`: `a630_sqe.fw`, `a618_gmu.bin`, `a615_zap.*`). Until then the
   screen is drawn by the CPU, and hakios-metal (built for the 642L) does not run here.
-- **Audio**: the SM7150's ADSP speaks APR to a WCD9375 codec, not the SC7280's services; `hakios.adsp.c` is that SoC's. The
-  DSP's image is pulled (`fw-audio/`); the PAS start of the DSP is the part that may carry over, the rest is new.
+- **Audio**: the audio DSP runs and is linked (`adsp_step=11 adsp_sm7150=1`: TrustZone starts the relocatable image at
+  0x95700000, GLINK with our queue (item 479) made by us, QRTR node 5 with 10 services, the APR audio services up). What is
+  left is the speakers' path, from surya's device tree:
+  - the amplifiers: two TI TAS256x on I2C (`i2c@a8c000`, 0x4c right and 0x4d left; reset GPIO 8 of one GPIO controller and
+    91 of the TLMM, interrupts on TLMM 58 and 30), in place of redwood's Awinic AW88261 (`hakios.speaker.c`)
+  - the interface: TERTIARY MI2S (`qcom,msm-dai-q6-mi2s-tert`, one RX line), AFE port 0x1004, pins GPIO 53 (bit clock),
+    54 (frame sync), 55 and 56 (data), function ter_mi2s, 8 mA; in place of redwood's PRI_TDM_RX_0 (`hakios.sound.c`)
+  - the DSP reads our samples through the SMMU as stream 0x1b21 (qcom,msm-audio-ion, sid mask 0xf), not redwood's 0x1801
+  - the codec WCD9375 (bolero, SoundWire) is for the earpiece, headset and microphones, not the loudspeakers
 - **Wi-Fi**: this phone's WCN3990 runs its firmware on the modem (Linux: ath10k over SNOC, the modem's WLAN service), so the
   modem must run first; `hakios.wifi.c` drives a WCN6750 with its own DSP. The modem's image is pulled (`fw-modem/`);
   `tools/soc-args.py` on the phone's own device tree (`adb pull /sys/firmware/fdt`) gives the `soc_*` the modem driver wants.
