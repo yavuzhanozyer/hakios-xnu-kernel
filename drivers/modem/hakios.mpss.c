@@ -1062,7 +1062,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
-	announce("read our partition with the modem in the shared memory (0x80900000), and its items");
+	announce("read our partition with the modem in the shared memory, and its items");
 	show_partition();
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (435) is there: it has run since the phone was started", &words);
@@ -1642,7 +1642,7 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the modem's memory (0x8b800000, 246 MB: memory of nobody's until TrustZone starts "
+	announce("put the image's segments into the modem's memory (memory of nobody's until TrustZone starts "
 	    "the modem), with zeroes where a segment is longer than its file, and read them back");
 	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image.size, VM_WIMG_WCOMB);
 	if (dsp_memory == NULL) {
@@ -3614,7 +3614,7 @@ link_stop(void)
 #define RMTFS_VERSION           1
 #define RMTFS_INSTANCE          0
 #define RMTFS_SECTOR            512
-#define RMTFS_BUFFER_SIZE       0x280000u       /* dt: reg of qcom,rmtfs_sharedmem@0 */
+#define RMTFS_BUFFER_SIZE       (sm7150 ? 0x200000u : 0x280000u)       /* dt: reg of qcom,rmtfs_sharedmem@0 (surya: 2 MB) */
 #define RMTFS_OPEN              1
 #define RMTFS_CLOSE             2
 #define RMTFS_RW_IOVEC          3
@@ -3699,7 +3699,11 @@ rmtfs_buffer_make(void)
 	if (rmtfs_window != NULL) {
 		return true;
 	}
-	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
+	/*
+	 * surya: redwood's 0x9c700000 is inside its framebuffer (cont_splash_region@9c000000), and TrustZone would not share
+	 * it (3 November 2026). Its compute DSP's memory, cdsp_regions@93900000 (30 MB, no-map, never started here), instead.
+	 */
+	rmtfs_buffer_pa = sm7150 ? 0x93900000ull : RMTFS_BUFFER_PA_DEFAULT;
 	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
 	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
 	if (rmtfs_window == NULL) {
