@@ -1,0 +1,8 @@
+# devices/surya/drivers/wifi/conf: the POCO X3 NFC's own Wi-Fi driver (the format of drivers/wifi/conf, docs/drivers-config.md).
+
+driver WCN3990
+	file    bsd/dev/hakios.wcn3990.c
+	default n
+	requires MODEM ADSP
+	help    the Wi-Fi of the POCO X3 NFC, a WCN3990 whose firmware runs on the modem: step one, the exchange with that
+	help    firmware's service (WLFW) as ath10k's qmi.c makes it (wcn3990=1, with the modem up). No other phone builds it

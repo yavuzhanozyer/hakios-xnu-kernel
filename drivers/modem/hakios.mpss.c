@@ -1503,6 +1503,14 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("mpss: %u: THE MODEM IS SHUT DOWN\n", step);
+	{
+		/* surya's WCN3990 (devices/surya/drivers/wifi/hakios.wcn3990.c) gave its MSA memory to the modem: back to us now */
+		extern void hakios_wcn3990_modem_down(void) __attribute__((weak));
+
+		if (hakios_wcn3990_modem_down != NULL) {
+			hakios_wcn3990_modem_down();
+		}
+	}
 	if (ipa_loaded) {
 		ipa_firmware_stop();
 		ipa_loaded = false;
@@ -3822,6 +3830,67 @@ rmtfs_share(bool in)
 		tell("mpss: %u: the shared buffer takes our write: it reads %#x\n", step, *(volatile uint32_t *)(rmtfs_window + 0x200));
 	}
 	return true;
+}
+
+/*
+ * Memory handed by TrustZone from its owners to others (Linux's qcom_scm_assign_mem(), each destination read and write),
+ * for the drivers beside the modem's: surya's WCN3990 gives its MSA memory to the modem and the WLAN with this. 0, or a
+ * negative number: TrustZone's result, or -1000 less its answer when it refused.
+ */
+int hakios_mpss_assign(uint64_t address, uint64_t size, const uint32_t *sources, unsigned source_count,
+    const uint32_t *destinations, unsigned destination_count);
+int
+hakios_mpss_assign(uint64_t address, uint64_t size, const uint32_t *sources, unsigned source_count,
+    const uint32_t *destinations, unsigned destination_count)
+{
+	struct {
+		uint64_t address, size;
+		uint64_t pad0[6];
+		uint32_t sources[8];                    /* +64 */
+		uint32_t pad1[8];
+		struct {                                /* +128 */
+			uint32_t vmid, permission;
+			uint64_t context;
+			uint32_t context_size, unused;
+		} destinations[4];
+		uint8_t pad2[16];
+		uint64_t more[7];                       /* +240 */
+	} *page;
+	vm_offset_t memory = 0;
+	uint64_t answer = ~0ull, pa;
+	int32_t result;
+
+	if (source_count == 0 || source_count > 8 || destination_count == 0 || destination_count > 4) {
+		return -EINVAL;
+	}
+	if (kmem_alloc(kernel_map, &memory, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		return -ENOMEM;
+	}
+	page = (void *)memory;
+	page->address = address;
+	page->size = size;
+	for (unsigned i = 0; i < source_count; i++) {
+		page->sources[i] = sources[i];
+	}
+	for (unsigned i = 0; i < destination_count; i++) {
+		page->destinations[i].vmid = destinations[i];
+		page->destinations[i].permission = VM_PERM_RW;
+	}
+	pa = kvtophys(memory);
+	page->more[0] = source_count * 4;
+	page->more[1] = pa + 128;
+	page->more[2] = destination_count * sizeof(page->destinations[0]);
+	page->more[3] = 0;
+	for (vm_offset_t line = memory; line < memory + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	result = scm("to assign memory", SCM_MP_ASSIGN, SCM_ASSIGN_ARGUMENTS, pa, 16, pa + 64, pa + 240, &answer);
+	kmem_free(kernel_map, memory, PAGE_SIZE);
+	if (result != 0) {
+		return result < 0 ? result : -result;
+	}
+	return answer == 0 ? 0 : -1000 - (int)(answer & 0xffff);
 }
 
 /* A TLV of a QMI message: its value and length, or NULL. */

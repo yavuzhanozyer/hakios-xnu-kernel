@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 364 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 365 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (27)
+# Drivers built in (28)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -102,6 +102,9 @@ CONFIG_HAKIOS_WIFI=y
 
 # the touch screen of the POCO X3 NFC: a Novatek NT36672C on SPI (QUPv3 SE0), its firmware sent over SPI from ... [hakios.nt36672c.c]
 # CONFIG_HAKIOS_NT36672C is not set
+
+# the Wi-Fi of the POCO X3 NFC, a WCN3990 whose firmware runs on the modem: step one, the exchange with that ... [hakios.wcn3990.c; requires CONFIG_HAKIOS_MODEM, CONFIG_HAKIOS_ADSP]
+# CONFIG_HAKIOS_WCN3990 is not set
 
 #
 # CPU, memory and boot (22)
