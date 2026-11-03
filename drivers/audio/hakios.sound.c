@@ -1560,7 +1560,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level == 4) {
 		thread_t feeder;
 
-		announce(sm7150 ? "the right amplifier (TAS2562 at 0x4c), set up, powered down until Darwin plays" :
+		announce(sm7150 ? "the amplifiers (TAS2562s at 0x4c and 0x4d), set up, powered down until Darwin plays" :
 		    "the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
 		if (!amp_prepare(acf, acf_size)) {
 			goto out;
@@ -1590,7 +1590,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	if (level >= 3) {
 		/* the clock runs (the port is started, the stream as well): the amplifiers can lock to it */
-		announce(sm7150 ? "the right amplifier (TAS2562 at 0x4c), set up, then started muted" :
+		announce(sm7150 ? "the amplifiers (TAS2562s at 0x4c and 0x4d), set up, then started muted" :
 		    "the amplifiers, set up from Android's Music profile, then started at the lowest volume");
 		if (!amp_prepare(acf, acf_size) || !amp_start()) {
 			goto out;
@@ -1602,7 +1602,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	if (level >= 3) {
 		say("sound: THE TONE PLAYS NOW for %u s: 1 kHz at -20 dBFS, %s, %u.%03u dB under %s\n", seconds,
-		    sm7150 ? "the right speaker" : "both speakers", below / 8, below % 8 * 125,
+		    "both speakers", below / 8, below % 8 * 125,
 		    sm7150 ? "the amplifier's 0 dB" : "Android's level");
 	}
 	say_when("the tone begins");

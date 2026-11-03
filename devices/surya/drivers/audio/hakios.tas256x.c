@@ -39,7 +39,8 @@
  * (the right) answers: revision 0x10, a TAS2562; the one at 0x4d (the left) does not: its reset is the PM6150L's GPIO 8.
  * tas_probe=4 (2 November 2026): the DSP took the clock (0x104, 3.072 MHz), the port's I2S configuration and its start; GPIO 53
  * toggled (6962 changes in 20000 reads) and GPIO 54 too (109): TERT MI2S runs.
- * sound=3 adsp_sm7150=1 (3 November 2026): the test tone HEARD from the right speaker, through the amplifier code below.
+ * sound=3 adsp_sm7150=1 (3 November 2026): the test tone HEARD from the right speaker, through the amplifier code below;
+ * sound=4: what iOS plays, heard. The left one: its reset, the PM6150L's GPIO 8, let go through the PMIC arbiter (below).
  */
 #include <kern/clock.h>
 #include <kern/startup.h>
@@ -612,17 +613,183 @@ interface_on(void)
 }
 
 /*
- * ---- the right amplifier for hakios.sound.c (sound=3 adsp_sm7150=1) ---------------------------------------------------
+ * ---- the PM6150L's GPIO 8: the left amplifier's reset -------------------------------------------------------------
  *
- * The TAS2562 at 0x4c, set up as Linux's mainline driver does (sound/soc/codecs/tas2562.c): a software reset; I2S
- * (frame start on the word clock's falling edge, data one bit after it, sampled on the rising edge), 48 kHz, 24-bit
- * words in 32-bit slots, the average of left and right (one amplifier, both channels of the tone); the current and
+ * Through the PMIC arbiter (version 5, the same blocks as the SC7280's: core 0xc440000, configuration 0xc40a000, observer
+ * 0xe600000 for reads, 0xc600000 for writes, 0x10000 a channel), one transfer at a time with the buttons' driver
+ * (hakios_spmi_lock()). The PM6150L is slave 4; its GPIO n is peripheral 0xc0 + n - 1 (volume up, GPIO 2, is 0x4c1),
+ * so GPIO 8 is 0x4c7. Linux's pinctrl-spmi-gpio.c: MODE_CTL 0x40, DIG_OUT_SOURCE_CTL 0x44 (LV/MV kinds: bit 7 the level),
+ * DIG_OUT_CTL 0x45 ([1:0] drive strength), EN_CTL 0x46 (bit 7). Written only through a channel the arbiter gives to
+ * the application processors; put back as found at the sound's end.
+ */
+#define ARB_CORE_PHYS           0x0c440000UL
+#define ARB_CNFG_PHYS           0x0c40a000UL
+#define ARB_OBSERVER_PHYS       0x0e600000UL
+#define ARB_CHNLS_PHYS          0x0c600000UL
+#define ARB_VERSION             0x000
+#define ARB_FEATURES            0x004
+#define ARB_CHANNEL(n)          (0x900 + 4 * (n))
+#define ARB_OWNER(n)            (0x700 + 4 * (n))
+#define CHANNEL_COMMAND         0x00
+#define CHANNEL_STATUS          0x08
+#define CHANNEL_WDATA0          0x10
+#define OBSERVER_DATA0          0x18
+#define PM6150L_GPIO8           0x4c7
+#define PMIC_GPIO_SUBTYPE       0x05
+#define PMIC_GPIO_MODE_CTL      0x40
+#define PMIC_GPIO_OUT_SOURCE    0x44
+#define PMIC_GPIO_OUT_CTL       0x45
+#define PMIC_GPIO_EN_CTL        0x46
+
+extern void hakios_spmi_lock(void);
+extern void hakios_spmi_unlock(void);
+
+static vm_offset_t arb_observer, gpio8_write;
+static uint32_t gpio8_channel;
+static bool gpio8_found, gpio8_set;
+static uint8_t gpio8_was[4];            /* 0x40, 0x44, 0x45, 0x46 as found */
+static const uint8_t gpio8_regs[4] = { PMIC_GPIO_MODE_CTL, PMIC_GPIO_OUT_SOURCE, PMIC_GPIO_OUT_CTL, PMIC_GPIO_EN_CTL };
+
+static bool
+arb_wait(vm_offset_t channel)
+{
+	uint32_t status = 0;
+
+	for (unsigned i = 0; i < 2000; i++) {
+		status = rd(channel + CHANNEL_STATUS);
+		if (status & 1) {
+			break;
+		}
+		delay(1);
+	}
+	return (status & 0xf) == 1;
+}
+
+static bool
+pmic_read(uint8_t reg, uint8_t *value)
+{
+	vm_offset_t channel = arb_observer + 0x80UL * gpio8_channel;
+	bool ok = false;
+
+	for (int tries = 0; tries < 3 && !ok; tries++) {
+		hakios_spmi_lock();
+		wr(channel + CHANNEL_COMMAND, 1u << 27 | (uint32_t)reg << 4);
+		ok = arb_wait(channel);
+		*value = (uint8_t)rd(channel + OBSERVER_DATA0);
+		hakios_spmi_unlock();
+	}
+	return ok;
+}
+
+static bool
+pmic_write(uint8_t reg, uint8_t value)
+{
+	uint8_t back = 0;
+	bool ok = false;
+
+	for (int tries = 0; tries < 3 && !ok; tries++) {
+		hakios_spmi_lock();
+		wr(gpio8_write + CHANNEL_WDATA0, value);
+		wr(gpio8_write + CHANNEL_COMMAND, (uint32_t)reg << 4);
+		ok = arb_wait(gpio8_write);
+		hakios_spmi_unlock();
+	}
+	if (!ok || !pmic_read(reg, &back) || back != value) {
+		say("tas256x: the PM6150L's GPIO 8: %#x <- %#x FAILED (reads %#x)\n", reg, value, back);
+		return false;
+	}
+	return true;
+}
+
+/* The left amplifier's reset let go (high), or put back as found; false if it cannot be. */
+static bool
+left_reset(bool release)
+{
+	uint8_t subtype = 0, out = 0;
+
+	if (!release) {
+		if (gpio8_set) {
+			say("tas256x: the PM6150L's GPIO 8 put back: %#x %#x %#x %#x\n", gpio8_was[0], gpio8_was[1], gpio8_was[2],
+			    gpio8_was[3]);
+			for (unsigned i = 4; i-- > 0;) {
+				(void)pmic_write(gpio8_regs[i], gpio8_was[i]);
+			}
+			gpio8_set = false;
+		}
+		return true;
+	}
+	if (!gpio8_found) {
+		vm_offset_t core = ml_io_map(ARB_CORE_PHYS, 0x1100), cnfg = ml_io_map(ARB_CNFG_PHYS, 0x1000);
+		uint32_t version = rd(core + ARB_VERSION), channels = rd(core + ARB_FEATURES) & 0x7ff;
+
+		if (version < 0x50000000u || version >= 0x70000000u) {
+			say("tas256x: the PMIC arbiter's version %#x is not 5: the left amplifier stays in reset\n", version);
+			return false;
+		}
+		if (channels == 0 || channels > 512) {
+			channels = 512;
+		}
+		for (uint32_t n = 0; n < channels && !gpio8_found; n++) {
+			if (((rd(core + ARB_CHANNEL(n)) >> 8) & 0xfff) == PM6150L_GPIO8) {
+				uint32_t owner = rd(cnfg + ARB_OWNER(n)) & 7;
+
+				say("tas256x: the PM6150L's GPIO 8 is the arbiter's channel %u, written by system %u%s\n", n, owner,
+				    owner == 0 ? " (us)" : "");
+				if (owner != 0) {
+					say("tas256x: not ours to write: the left amplifier stays in reset\n");
+					return false;
+				}
+				gpio8_channel = n;
+				gpio8_found = true;
+			}
+		}
+		if (!gpio8_found) {
+			say("tas256x: no channel of the arbiter is the PM6150L's GPIO 8: the left amplifier stays in reset\n");
+			return false;
+		}
+		arb_observer = ml_io_map(ARB_OBSERVER_PHYS, 0x10000);
+		gpio8_write = ml_io_map(ARB_CHNLS_PHYS + 0x10000UL * gpio8_channel, 0x1000);
+	}
+	if (!pmic_read(PMIC_GPIO_SUBTYPE, &subtype)) {
+		say("tas256x: the PM6150L's GPIO 8 cannot be read: the left amplifier stays in reset\n");
+		return false;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		if (!pmic_read(gpio8_regs[i], &gpio8_was[i])) {
+			return false;
+		}
+	}
+	say("tas256x: the PM6150L's GPIO 8 (subtype %#x): mode %#x, source %#x, output %#x, enable %#x; about to drive it high\n",
+	    subtype, gpio8_was[0], gpio8_was[1], gpio8_was[2], gpio8_was[3]);
+	gpio8_set = true;
+	out = (gpio8_was[2] & 3) ? gpio8_was[2] : (uint8_t)((gpio8_was[2] & ~0x33u) | 1);     /* CMOS, at least the low strength */
+	if (subtype >= 0x10) {          /* LV/MV: the direction in MODE_CTL, the level in bit 7 of the source */
+		if (!pmic_write(PMIC_GPIO_OUT_CTL, out) || !pmic_write(PMIC_GPIO_OUT_SOURCE, 0x80) ||
+		    !pmic_write(PMIC_GPIO_MODE_CTL, 1) || !pmic_write(PMIC_GPIO_EN_CTL, 0x80)) {
+			return false;
+		}
+	} else if (!pmic_write(PMIC_GPIO_OUT_CTL, out) || !pmic_write(PMIC_GPIO_MODE_CTL, 1u << 4 | 1) ||
+	    !pmic_write(PMIC_GPIO_EN_CTL, 0x80)) {
+		return false;
+	}
+	delay_for_interval(5, NSEC_PER_MSEC);
+	say("tas256x: the PM6150L's GPIO 8 driven high: the left amplifier let out of reset\n");
+	return true;
+}
+
+/*
+ * ---- the amplifiers for hakios.sound.c (sound=3 and 4, adsp_sm7150=1) ---------------------------------------------------
+ *
+ * The TAS2562s at 0x4c (right; reset GPIO 91) and 0x4d (left; reset the PM6150L's GPIO 8), set up as Linux's mainline
+ * driver does (sound/soc/codecs/tas2562.c): a software reset; I2S (frame start on the word clock's falling edge, data
+ * one bit after it, sampled on the rising edge), 48 kHz, 24-bit words in 32-bit slots; each its own channel (Android's
+ * "ASI1 SEL": the right one Right, the left one Left), or, if only one answers, the average of both; the current and
  * voltage sense off (no speaker protection here: it is the DSP's under Android); powered up only while the port's
- * clock runs. Its loudness is the digital volume (page 2, 0x0c-0x0f, 0x40000000 for 0 dB), 6 dB a step; "below" is
- * eighths of a dB under 0 dB of that volume at the amplifier's own default level. The left one at 0x4d is held in
- * reset by the PM6150L's GPIO 8 and stays silent.
+ * clock runs. Their loudness is the digital volume (page 2, 0x0c-0x0f, 0x40000000 for 0 dB), 6 dB a step; "below" is
+ * eighths of a dB under 0 dB of that volume at the amplifiers' own default level. tas_left=0 leaves the left one alone.
  */
 #define TAS_RIGHT               0x4c
+#define TAS_LEFT                0x4d
 #define TAS_PAGE                0x00
 #define TAS_SW_RESET            0x01
 #define TAS_PWR_CTL             0x02
@@ -636,6 +803,7 @@ interface_on(void)
 #define TAS_BOOK                0x7f
 #define TAS_DVC                 0x0c            /* page 2: the digital volume, four bytes, the high one first */
 #define TAS_MUTED               960             /* 120 dB under: the volume 0 */
+#define AMPS                    2
 
 bool hakios_tas256x_prepare(void);
 bool hakios_tas256x_start(void);
@@ -645,28 +813,32 @@ void hakios_tas256x_stop(void);
 void hakios_tas256x_release(void);
 void hakios_tas256x_quiesce(void);
 
+static const uint8_t amp_address[AMPS] = { TAS_RIGHT, TAS_LEFT };
+static const char *const amp_name[AMPS] = { "right", "left" };
+static bool amp_present[AMPS];
+static unsigned amp_count;
 static bool amp_prepared, amp_on;
 static uint32_t amp_below = TAS_MUTED;
 
 static bool
-amp_write(const char *what, uint8_t reg, uint8_t value)
+amp_write(unsigned a, const char *what, uint8_t reg, uint8_t value)
 {
-	int error = tas_write(TAS_RIGHT, reg, value);
+	int error = tas_write(amp_address[a], reg, value);
 
 	if (error) {
-		say("tas256x: the amplifier: %s (%#x <- %#x): THE TRANSFER FAILED (%d)\n", what, reg, value, error);
+		say("tas256x: the %s amplifier: %s (%#x <- %#x): THE TRANSFER FAILED (%d)\n", amp_name[a], what, reg, value, error);
 		return false;
 	}
 	return true;
 }
 
 static bool
-amp_read(uint8_t reg, uint8_t *value)
+amp_read(unsigned a, uint8_t reg, uint8_t *value)
 {
-	int error = tas_read(TAS_RIGHT, reg, value);
+	int error = tas_read(amp_address[a], reg, value);
 
 	if (error) {
-		say("tas256x: the amplifier: a read of %#x FAILED (%d)\n", reg, error);
+		say("tas256x: the %s amplifier: a read of %#x FAILED (%d)\n", amp_name[a], reg, error);
 		return false;
 	}
 	return true;
@@ -687,23 +859,77 @@ amp_volume_set(uint32_t below_now)
 			value /= 10;
 		}
 	}
-	if (!amp_write("page 2", TAS_PAGE, 2)) {
-		return false;
-	}
-	for (unsigned i = 0; i < 4; i++) {
-		if (!amp_write("the digital volume", (uint8_t)(TAS_DVC + i), (uint8_t)(value >> (24 - 8 * i)))) {
-			(void)amp_write("page 0", TAS_PAGE, 0);
+	for (unsigned a = 0; a < AMPS; a++) {
+		if (!amp_present[a]) {
+			continue;
+		}
+		if (!amp_write(a, "page 2", TAS_PAGE, 2)) {
+			return false;
+		}
+		for (unsigned i = 0; i < 4; i++) {
+			if (!amp_write(a, "the digital volume", (uint8_t)(TAS_DVC + i), (uint8_t)(value >> (24 - 8 * i)))) {
+				(void)amp_write(a, "page 0", TAS_PAGE, 0);
+				return false;
+			}
+		}
+		if (!amp_write(a, "page 0", TAS_PAGE, 0)) {
 			return false;
 		}
 	}
 	amp_below = below_now;
-	return amp_write("page 0", TAS_PAGE, 0);
+	return true;
+}
+
+/* One amplifier found and reset; false if it is not there or not a TAS2562. */
+static bool
+amp_reset(unsigned a)
+{
+	uint8_t revision = 0;
+
+	if (tas_write(amp_address[a], TAS_PAGE, 0) != 0) {
+		say("tas256x: the %s amplifier (%#x) does not answer\n", amp_name[a], amp_address[a]);
+		return false;
+	}
+	if (!amp_write(a, "book 0", TAS_BOOK, 0) || !amp_write(a, "software reset", TAS_SW_RESET, 1)) {
+		return false;
+	}
+	delay_for_interval(2, NSEC_PER_MSEC);
+	if (!amp_write(a, "page 0", TAS_PAGE, 0) || !amp_read(a, TAS_REV_ID, &revision)) {
+		return false;
+	}
+	if ((revision & 0xf0) != 0x10) {
+		say("tas256x: the %s amplifier's revision %#x is not a TAS2562's: not used\n", amp_name[a], revision);
+		return false;
+	}
+	return amp_write(a, "shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+}
+
+/* Its interface: I2S, 48 kHz, 24 bits in 32, its channel (1 left, 2 right, 3 the average). */
+static bool
+amp_interface(unsigned a, unsigned channel)
+{
+	uint8_t cfg0 = 0, cfg1 = 0, cfg2 = 0;
+
+	if (!amp_read(a, TAS_TDM_CFG0, &cfg0) || !amp_read(a, TAS_TDM_CFG1, &cfg1) || !amp_read(a, TAS_TDM_CFG2, &cfg2)) {
+		return false;
+	}
+	cfg0 = (uint8_t)((cfg0 & ~0x0fu) | 4u << 1 | 1);        /* 44.1/48 kHz; the frame starts high-to-low (I2S) */
+	cfg1 = (uint8_t)((cfg1 & ~0x3fu) | 1u << 1);            /* data one bit clock after the frame start, the rising edge */
+	cfg2 = (uint8_t)((cfg2 & ~0x3fu) | channel << 4 | 2u << 2 | 2u);        /* its channel; 24-bit words; 32-bit slots */
+	if (!amp_write(a, "TDM configuration 0", TAS_TDM_CFG0, cfg0) || !amp_write(a, "TDM configuration 1", TAS_TDM_CFG1, cfg1) ||
+	    !amp_write(a, "TDM configuration 2", TAS_TDM_CFG2, cfg2)) {
+		return false;
+	}
+	(void)amp_read(a, TAS_TDM_CFG2, &cfg2);
+	say("tas256x: the %s amplifier set up: %s, TDM configuration %#x %#x %#x, shut down\n", amp_name[a],
+	    channel == 1 ? "the left channel" : channel == 2 ? "the right channel" : "left and right averaged", cfg0, cfg1, cfg2);
+	return true;
 }
 
 bool
 hakios_tas256x_prepare(void)
 {
-	uint8_t revision = 0, cfg0 = 0, cfg1 = 0, cfg2 = 0;
+	uint32_t left = 1;
 
 	if (amp_prepared) {
 		return true;
@@ -711,35 +937,28 @@ hakios_tas256x_prepare(void)
 	if (!bus_up()) {
 		return false;
 	}
-	say("tas256x: the amplifier at %#x: reset, I2S at 48 kHz (24 bits in 32), left and right averaged, shut down, muted\n",
-	    TAS_RIGHT);
-	if (!amp_write("page 0", TAS_PAGE, 0) || !amp_write("book 0", TAS_BOOK, 0) || !amp_write("software reset", TAS_SW_RESET, 1)) {
+	PE_parse_boot_argn("tas_left", &left, sizeof(left));
+	amp_count = 0;
+	amp_present[0] = amp_reset(0);
+	amp_present[1] = left != 0 && left_reset(true) && amp_reset(1);
+	for (unsigned a = 0; a < AMPS; a++) {
+		amp_count += amp_present[a];
+	}
+	if (amp_count == 0) {
+		say("tas256x: no amplifier to play through\n");
 		return false;
 	}
-	delay_for_interval(2, NSEC_PER_MSEC);
-	if (!amp_write("page 0", TAS_PAGE, 0) || !amp_read(TAS_REV_ID, &revision)) {
+	for (unsigned a = 0; a < AMPS; a++) {
+		/* each its own channel when both are there; one alone gets both, averaged */
+		if (amp_present[a] && !amp_interface(a, amp_count == 2 ? (a == 0 ? 2u : 1u) : 3u)) {
+			return false;
+		}
+	}
+	if (!amp_volume_set(TAS_MUTED)) {
 		return false;
 	}
-	if ((revision & 0xf0) != 0x10) {
-		say("tas256x: the amplifier's revision %#x is not a TAS2562's: not set up\n", revision);
-		return false;
-	}
-	if (!amp_write("shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN) || !amp_read(TAS_TDM_CFG0, &cfg0) ||
-	    !amp_read(TAS_TDM_CFG1, &cfg1) || !amp_read(TAS_TDM_CFG2, &cfg2)) {
-		return false;
-	}
-	say("tas256x: the amplifier after its reset: TDM configuration %#x %#x %#x\n", cfg0, cfg1, cfg2);
-	cfg0 = (uint8_t)((cfg0 & ~0x0fu) | 4u << 1 | 1);        /* 44.1/48 kHz; the frame starts high-to-low (I2S) */
-	cfg1 = (uint8_t)((cfg1 & ~0x3fu) | 1u << 1);            /* data one bit clock after the frame start, the rising edge */
-	cfg2 = (uint8_t)((cfg2 & ~0x3fu) | 3u << 4 | 2u << 2 | 2u);     /* (left + right) / 2; 24-bit words; 32-bit slots */
-	if (!amp_write("TDM configuration 0", TAS_TDM_CFG0, cfg0) || !amp_write("TDM configuration 1", TAS_TDM_CFG1, cfg1) ||
-	    !amp_write("TDM configuration 2", TAS_TDM_CFG2, cfg2) || !amp_volume_set(TAS_MUTED)) {
-		return false;
-	}
-	(void)amp_read(TAS_TDM_CFG0, &cfg0);
-	(void)amp_read(TAS_TDM_CFG1, &cfg1);
-	(void)amp_read(TAS_TDM_CFG2, &cfg2);
-	say("tas256x: the amplifier set up: TDM configuration %#x %#x %#x, shut down, muted\n", cfg0, cfg1, cfg2);
+	say("tas256x: %s set up, shut down, muted\n", amp_count == 2 ? "BOTH AMPLIFIERS (stereo)" :
+	    amp_present[0] ? "the right amplifier alone" : "the left amplifier alone");
 	amp_prepared = true;
 	return true;
 }
@@ -747,19 +966,26 @@ hakios_tas256x_prepare(void)
 bool
 hakios_tas256x_start(void)
 {
-	uint8_t power = 0, latch = 0;
-
 	if (!amp_prepared) {
 		return false;
 	}
-	if (!amp_write("powered up, active", TAS_PWR_CTL, TAS_PWR_ACTIVE)) {
-		return false;
+	for (unsigned a = 0; a < AMPS; a++) {
+		if (amp_present[a] && !amp_write(a, "powered up, active", TAS_PWR_CTL, TAS_PWR_ACTIVE)) {
+			hakios_tas256x_quiesce();
+			return false;
+		}
+		amp_on = true;
 	}
-	amp_on = true;
 	delay_for_interval(10, NSEC_PER_MSEC);
-	(void)amp_read(TAS_PWR_CTL, &power);
-	(void)amp_read(TAS_INT_LTCH0, &latch);
-	say("tas256x: the amplifier is on: power %#x, faults latched %#x\n", power, latch);
+	for (unsigned a = 0; a < AMPS; a++) {
+		uint8_t power = 0, latch = 0;
+
+		if (amp_present[a]) {
+			(void)amp_read(a, TAS_PWR_CTL, &power);
+			(void)amp_read(a, TAS_INT_LTCH0, &latch);
+			say("tas256x: the amplifier is on (%s): power %#x, faults latched %#x\n", amp_name[a], power, latch);
+		}
+	}
 	return true;
 }
 
@@ -784,27 +1010,32 @@ hakios_tas256x_volume(uint32_t below, uint32_t step_ms)
 			delay_for_interval(step_ms, NSEC_PER_MSEC);
 		}
 	}
-	say("tas256x: the amplifier's volume: %u.%03u dB under 0 dB\n", below / 8, below % 8 * 125);
+	say("tas256x: the amplifiers' volume: %u.%03u dB under 0 dB\n", below / 8, below % 8 * 125);
 	return true;
 }
 
 bool
 hakios_tas256x_healthy(void)
 {
-	uint8_t latch = 0;
-
 	if (!amp_on) {
 		return true;
 	}
-	if (!amp_read(TAS_INT_LTCH0, &latch)) {
-		hakios_tas256x_quiesce();
-		return false;
-	}
-	if (latch & 3) {
-		say("tas256x: THE AMPLIFIER REPORTS A FAULT (%#x: %s%s): shut down\n", latch, (latch & 1) ? "over temperature " : "",
-		    (latch & 2) ? "over current" : "");
-		hakios_tas256x_quiesce();
-		return false;
+	for (unsigned a = 0; a < AMPS; a++) {
+		uint8_t latch = 0;
+
+		if (!amp_present[a]) {
+			continue;
+		}
+		if (!amp_read(a, TAS_INT_LTCH0, &latch)) {
+			hakios_tas256x_quiesce();
+			return false;
+		}
+		if (latch & 3) {
+			say("tas256x: THE %s AMPLIFIER REPORTS A FAULT (%#x: %s%s): both shut down\n", a == 0 ? "RIGHT" : "LEFT", latch,
+			    (latch & 1) ? "over temperature " : "", (latch & 2) ? "over current" : "");
+			hakios_tas256x_quiesce();
+			return false;
+		}
 	}
 	return true;
 }
@@ -815,13 +1046,17 @@ hakios_tas256x_stop(void)
 {
 	if (amp_on) {
 		(void)hakios_tas256x_volume(TAS_MUTED, 20);
-		(void)amp_write("shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+		for (unsigned a = 0; a < AMPS; a++) {
+			if (amp_present[a]) {
+				(void)amp_write(a, "shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+			}
+		}
 		amp_on = false;
-		say("tas256x: the amplifier faded out and shut down\n");
+		say("tas256x: the amplifiers faded out and shut down\n");
 	}
 }
 
-/* ... and its reset put back: the sound's end */
+/* ... and their resets put back: the sound's end */
 void
 hakios_tas256x_release(void)
 {
@@ -829,7 +1064,8 @@ hakios_tas256x_release(void)
 		return;
 	}
 	hakios_tas256x_stop();
-	say("tas256x: the amplifier shut down; its reset GPIO 91 put back (%#x)\n", gpio91_was);
+	(void)left_reset(false);
+	say("tas256x: the right amplifier's reset GPIO 91 put back (%#x)\n", gpio91_was);
 	wr(north_base + GPIO_IO(91), 0);
 	wr(north_base + GPIO_CFG(91), gpio91_was);
 	amp_prepared = false;
@@ -840,7 +1076,11 @@ void
 hakios_tas256x_quiesce(void)
 {
 	if (amp_on) {
-		(void)tas_write(TAS_RIGHT, TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+		for (unsigned a = 0; a < AMPS; a++) {
+			if (amp_present[a]) {
+				(void)tas_write(amp_address[a], TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+			}
+		}
 		amp_on = false;
 	}
 }
