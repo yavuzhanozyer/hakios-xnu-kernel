@@ -4645,7 +4645,13 @@ jsn_string(const char *from, const char *end, const char *key, char *out, size_t
 static void
 servreg_load(void)
 {
-	static const char *const files[] = { "modemr.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn", "wpssr.jsn" };
+	/*
+	 * modemuw.jsn: the modem's user domain for the WLAN (msm/modem/wlan_pd: kernel/elf_loader, wlan/fw), where the SDM845's
+	 * and the SM7150's Wi-Fi firmware runs. Without it the SM7150's modem asked for "kernel/elf_loader" and was told of no
+	 * domain (surya, 3 November 2026), and its Wi-Fi's service never came. A file that is not there is passed over.
+	 */
+	static const char *const files[] = { "modemr.jsn", "modemuw.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn",
+		"cdspr.jsn", "wpssr.jsn", "slpir.jsn", "slpius.jsn" };
 
 	servreg_maps = 0;
 	for (unsigned f = 0; f < sizeof(files) / sizeof(files[0]); f++) {
