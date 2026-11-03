@@ -1791,7 +1791,11 @@ step_our_item(void)
 	 * driver here). Off unless modem_ipa=1 (valid, off) or 3 (on): with the entry the run of 23 October hung.
 	 */
 	{
-		uint32_t ipa = 3;                       /* (the modem's IPA driver waits for this entry to exist: see the IPA's handshake) */
+		/*
+		 * (the modem's IPA driver waits for this entry to exist: see the IPA's handshake). On the SM7150 no IPA runs here
+		 * (its v4.2 is not this file's): 1, "valid, the clock off", for the modem to keep away from it.
+		 */
+		uint32_t ipa = sm7150 ? 1 : 3;
 
 		PE_parse_boot_argn("modem_ipa", &ipa, sizeof(ipa));
 		if (ipa != 0) {
@@ -1826,7 +1830,12 @@ step_our_item(void)
 	 * (modem_ipa_item=0: not; our SMMU context maps all of DDR, so the item needs no mapping of its own).
 	 */
 	{
-		uint32_t ipa_item = 497, ipa_size = 0;
+		/*
+		 * Not on the SM7150: its device tree has no qcom,ipa-q6-smem-size, its modem allocates the item itself, and with
+		 * ours there it died at once (3 November 2026: "ipa_ipfltr.c:441: IPA Assert: IPA_SMEM_ALLOC_EX(smem_param) ==
+		 * SMEM_STATUS_SUCCESS failed").
+		 */
+		uint32_t ipa_item = sm7150 ? 0 : 497, ipa_size = 0;
 
 		PE_parse_boot_argn("modem_ipa_item", &ipa_item, sizeof(ipa_item));
 		if (ipa_item != 0) {
