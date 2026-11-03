@@ -209,11 +209,102 @@ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
 #define CFG_8MA                 (3u << 6)
 #define CFG_OUTPUT              (1u << 9)
 
-static const struct {
+/*
+ * boot-arg adsp_sm7150=1 (the POCO X3 NFC): the speakers' interface is TERTIARY MI2S, AFE port 0x1004, on GPIO 53 (bit
+ * clock), 54 (word clock), 55 and 56 (data) of the west tile (0x3500000), function 1 (ter_mi2s in Linux's pinctrl-sm7150.c),
+ * 8 mA; its bit clock 0x104 at 3.072 MHz and its I2S configuration as Android's mixer path has it (S24_LE, 48 kHz, stereo).
+ * Run that far by devices/surya/drivers/audio/hakios.tas256x.c (tas_probe=4): the DSP took all of it and both clocks
+ * toggled at the pins. The DSP sees our memory as stream 0x1b21 (surya's qcom,msm-audio-ion). The amplifiers are TI
+ * TAS2562s, not this file's: levels 3 and 4 drive the right one through devices/surya/drivers/audio/hakios.tas256x.c (the
+ * left one's reset is the PM6150L's GPIO 8, not reached yet). Its current and voltage sense are off, so it has no watch of
+ * its own (amp_monitor()); "Android's level" is, there, the amplifier's 0 dB.
+ */
+static uint32_t sm7150;
+
+/* surya's amplifier (hakios.tas256x.c): weak, as the other phones' kernels do not build that file */
+extern bool hakios_tas256x_prepare(void) __attribute__((weak));
+extern bool hakios_tas256x_start(void) __attribute__((weak));
+extern bool hakios_tas256x_volume(uint32_t below, uint32_t step_ms) __attribute__((weak));
+extern bool hakios_tas256x_healthy(void) __attribute__((weak));
+extern void hakios_tas256x_stop(void) __attribute__((weak));
+extern void hakios_tas256x_release(void) __attribute__((weak));
+extern void hakios_tas256x_quiesce(void) __attribute__((weak));
+
+static bool
+amp_prepare(const uint8_t *acf, uint64_t acf_size)
+{
+	if (!sm7150) {
+		return hakios_speaker_prepare(acf, acf_size);
+	}
+	if (hakios_tas256x_prepare == NULL) {
+		say("sound: no TAS256X driver in this kernel (CONFIG_HAKIOS_TAS256X)\n");
+		return false;
+	}
+	return hakios_tas256x_prepare();
+}
+
+static bool
+amp_start(void)
+{
+	return sm7150 ? hakios_tas256x_start != NULL && hakios_tas256x_start() : hakios_speaker_start();
+}
+
+static bool
+amp_volume(uint32_t below_now, uint32_t step_ms)
+{
+	return sm7150 ? hakios_tas256x_volume != NULL && hakios_tas256x_volume(below_now, step_ms) :
+	       hakios_speaker_volume(below_now, step_ms);
+}
+
+static bool
+amp_healthy(void)
+{
+	return sm7150 ? hakios_tas256x_healthy == NULL || hakios_tas256x_healthy() : hakios_speaker_healthy();
+}
+
+/* faded out and powered down, still set up (level 4 starts them again) */
+static void
+amp_stop(void)
+{
+	if (!sm7150) {
+		hakios_speaker_stop();
+	} else if (hakios_tas256x_stop != NULL) {
+		hakios_tas256x_stop();
+	}
+}
+
+/* ... and let go of for good: the sound's end */
+static void
+amp_release(void)
+{
+	if (!sm7150) {
+		hakios_speaker_stop();
+	} else if (hakios_tas256x_release != NULL) {
+		hakios_tas256x_release();
+	}
+}
+
+/* the amplifiers' own watch (redwood's: temperature and battery); the TAS2562's sense is off here: nothing asked */
+static uint32_t
+amp_monitor(bool tell)
+{
+	return sm7150 ? 0 : hakios_speaker_monitor(tell);
+}
+
+struct pin_setting {
 	unsigned pin;
 	const char *name;
 	uint32_t cfg, io;               /* Android's active state */
-} tdm_pins[] = {
+};
+
+static const struct pin_setting mi2s_pins[] = {
+	{ 53, "gpio53 (TERT MI2S bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 54, "gpio54 (TERT MI2S word clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 55, "gpio55 (TERT MI2S data 0)", CFG_MI2S0 | CFG_8MA, 0 },
+	{ 56, "gpio56 (TERT MI2S data 1)", CFG_MI2S0 | CFG_8MA, 0 },
+};
+
+static const struct pin_setting tdm_pins[] = {
 	{ 97, "gpio97 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
@@ -223,17 +314,22 @@ static const struct {
 static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
 static bool pins_taken;
 
+#define PIN(i)                  (sm7150 ? mi2s_pins[i] : tdm_pins[i])
+
 static void
 pins_on(void)
 {
+	if (sm7150) {
+		tlmm.phys = 0x03500000;         /* (the west tile, where the four are) */
+	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		found_cfg[i] = get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
-		found_io[i] = get(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin));
+		found_cfg[i] = get(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin));
+		found_io[i] = get(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin));
 	}
 	pins_taken = true;
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), tdm_pins[i].io);
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), tdm_pins[i].cfg);
+		put(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin), PIN(i).io);
+		put(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin), PIN(i).cfg);
 	}
 }
 
@@ -244,9 +340,9 @@ pins_off(void)
 		return;
 	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
-		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
+		put(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin), found_cfg[i]);
+		put(&tlmm, PIN(i).name, GPIO_IO(PIN(i).pin), found_io[i] & 2);
+		get(&tlmm, PIN(i).name, GPIO_CFG(PIN(i).pin));
 	}
 	pins_taken = false;
 }
@@ -335,7 +431,7 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    (sm7150 ? 0x1004 : 0x9000)      /* PRI_TDM_RX_0; TERT_MI2S_RX on the SM7150 */
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
@@ -445,6 +541,25 @@ afe_on(void)
 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
 	uint16_t start[2] = { PORT, 0 };
 
+	if (sm7150) {
+		struct afe_clock_set mi2s_clock = { 1, 0x104 /* TER_MI2S_IBIT */, 48000 * 32 * 2, 1 /* couple no */, 0, 1 };
+		struct {
+			uint32_t version;
+			uint16_t bits, channel_mode, mono_stereo, ws_source;
+			uint32_t rate;
+			uint16_t data_format, reserved;
+		} __attribute__((packed)) i2s = { 1, 24, 1 /* SD0 */, 1 /* stereo */, 1 /* ours */, RATE, 0, 0 };
+
+		announce("the DSP is asked for TERT MI2S's bit clock, the port 0x1004 and its start (AFE)");
+		clock_on = afe_service_param("TERT MI2S's bit clock (0x104) at 3.072 MHz, on", AFE_MODULE_CLOCK_SET,
+		    AFE_PARAM_ID_CLOCK_SET, &mi2s_clock, sizeof(mi2s_clock));
+		if (!clock_on || !afe_port_param("the port 0x1004: I2S on SD0, stereo, 24 bits, 48 kHz, the word clock ours",
+		    AFE_MODULE_AUDIO_DEV_INTERFACE, 0x0001020du /* AFE_PARAM_ID_I2S_CONFIG */, &i2s, sizeof(i2s))) {
+			return false;
+		}
+		port_on = command("the port 0x1004, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start, sizeof(start), 0, NULL);
+		return port_on;
+	}
 	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
 	clock_on = afe_clock(true);
 	if (!clock_on) {
@@ -474,13 +589,19 @@ afe_off(void)
 	struct afe_group_enable disable = { GROUP, 0 };
 
 	if (port_on) {
-		command("the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
+		command(sm7150 ? "the port 0x1004, stopped" : "the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
 		port_on = false;
 	}
 	if (group_on) {
 		afe_service_param("the group 0x9100, off", AFE_MODULE_GROUP_DEVICE, AFE_PARAM_ID_GROUP_DEVICE_ENABLE, &disable,
 		    sizeof(disable));
 		group_on = false;
+	}
+	if (clock_on && sm7150) {
+		struct afe_clock_set off = { 1, 0x104, 48000 * 32 * 2, 1, 0, 0 };
+
+		afe_service_param("TERT MI2S's bit clock, off", AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &off, sizeof(off));
+		clock_on = false;
 	}
 	if (clock_on) {
 		afe_clock(false);
@@ -525,7 +646,7 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
 #define PTE_ADDRESS             0x0000fffffffff000ull
 #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as hakios.wifi.c's */
 
-#define AUDIO_STREAM            0x1801
+#define AUDIO_STREAM            (sm7150 ? 0x1b21 : 0x1801)      /* surya: iommus <&apps_smmu 0x1b21 0> */
 #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
 #define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
 
@@ -1040,7 +1161,7 @@ play(uint32_t ms, bool amplifiers)
 		if (amplifiers && now - last_look >= 200000) {
 			last_look = now;
 			healthy_looks++;
-			if (!hakios_speaker_healthy()) {
+			if (!amp_healthy()) {
 				ok = false;
 				tone_over = true;
 			}
@@ -1284,10 +1405,10 @@ watch(void)
 			if (muted) {
 				guard_off(true);
 				if (on) {
-					hakios_speaker_stop();
+					amp_stop();
 					on = false;
 				}
-			} else if (on && !hakios_speaker_volume(below_with(extra), 1)) {
+			} else if (on && !amp_volume(below_with(extra), 1)) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1299,7 +1420,7 @@ watch(void)
 			say_when("Darwin plays: the amplifiers are started");
 			starts++;
 			darwin_peak = 0;
-			if (!hakios_speaker_start() || !hakios_speaker_volume(below_with(extra), 1)) {
+			if (!amp_start() || !amp_volume(below_with(extra), 1)) {
 				say("sound: THE AMPLIFIERS DID NOT START; Darwin's sound goes on to the DSP, unheard\n");
 				guard_off(true);
 				given_up = true;
@@ -1319,11 +1440,11 @@ watch(void)
 			say("sound: what Darwin wrote while they were on peaked at %u%% of full scale (%u)\n", darwin_peak * 100 / 32768,
 			    darwin_peak);
 			guard_off(false);
-			hakios_speaker_stop();
+			amp_stop();
 			on = false;
 		} else if (on && now - last_look >= 200000) {
 			last_look = now;
-			if (!hakios_speaker_healthy()) {
+			if (!amp_healthy()) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1332,7 +1453,7 @@ watch(void)
 				uint32_t wanted;
 
 				last_monitor = now;
-				wanted = hakios_speaker_monitor(monitor_looks++ % 10 == 0);
+				wanted = amp_monitor(monitor_looks++ % 10 == 0);
 				if (wanted != monitor) {
 					say("sound: the amplifiers' watch asks for %u.%03u dB less (it was %u.%03u)\n", wanted / 8, wanted % 8 * 125,
 					    monitor / 8, monitor % 8 * 125);
@@ -1366,7 +1487,7 @@ take_down(void)
 	lck_mtx_lock(&sound_lock);
 	if (running && !taken_down) {
 		taken_down = true;
-		hakios_speaker_stop();
+		amp_release();
 		stream_off();
 		afe_off();
 		pins_off();
@@ -1399,7 +1520,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		    "the port and a stream with a test tone, the amplifiers off" :
 		    "the port, a stream with a test tone, and the amplifiers", seconds);
 	}
-	if (level >= 3) {
+	if (level >= 3 && !sm7150) {
 		acf = hakios_adsp_fw_file("aw882xx_acf.bin", &acf_size);
 		if (acf == NULL) {
 			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
@@ -1417,15 +1538,16 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		hakios_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce(sm7150 ? "the TERT MI2S pins (GPIO 53 to 56) to the interface" :
+	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
 	}
 	sleep_ms(20);
-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
+	pin_activity(sm7150 ? 53 : 97, "the bit clock", &changes, &ones);
+	pin_activity(sm7150 ? 54 : 100, "the frame sync", &sync_changes, &sync_ones);
+	say("sound: %s\n", changes > 100 && sync_changes > 4 ? (sm7150 ? "THE I2S BIT CLOCK AND WORD CLOCK RUN at the pins" : "THE TDM CLOCK AND FRAME SYNC RUN at the pins") :
 	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
 	if (level == 1) {
 		sleep_ms(seconds * 1000);
@@ -1438,8 +1560,9 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level == 4) {
 		thread_t feeder;
 
-		announce("the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
-		if (!hakios_speaker_prepare(acf, acf_size)) {
+		announce(sm7150 ? "the amplifiers (TAS2562s at 0x4c and 0x4d), set up, powered down until Darwin plays" :
+		    "the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
+		if (!amp_prepare(acf, acf_size)) {
 			goto out;
 		}
 		hakios_adsp_fw_free(acf, acf_size);
@@ -1467,18 +1590,20 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	if (level >= 3) {
 		/* the clock runs (the port is started, the stream as well): the amplifiers can lock to it */
-		announce("the amplifiers, set up from Android's Music profile, then started at the lowest volume");
-		if (!hakios_speaker_prepare(acf, acf_size) || !hakios_speaker_start()) {
+		announce(sm7150 ? "the amplifiers (TAS2562s at 0x4c and 0x4d), set up, then started muted" :
+		    "the amplifiers, set up from Android's Music profile, then started at the lowest volume");
+		if (!amp_prepare(acf, acf_size) || !amp_start()) {
 			goto out;
 		}
 	}
 	/* (the amplifiers are faded in before the tone begins: they fade in on silence, and the tone starts at that level) */
-	if (level >= 3 && !hakios_speaker_volume(below, 50)) {
+	if (level >= 3 && !amp_volume(below, 50)) {
 		goto out;
 	}
 	if (level >= 3) {
-		say("sound: THE TONE PLAYS NOW for %u s: 1 kHz at -20 dBFS, both speakers, %u.%03u dB under Android's level\n",
-		    seconds, below / 8, below % 8 * 125);
+		say("sound: THE TONE PLAYS NOW for %u s: 1 kHz at -20 dBFS, %s, %u.%03u dB under %s\n", seconds,
+		    "both speakers", below / 8, below % 8 * 125,
+		    sm7150 ? "the amplifier's 0 dB" : "Android's level");
 	}
 	say_when("the tone begins");
 	ok = play(seconds * 1000, level >= 3);
@@ -1505,7 +1630,16 @@ hakios_sound_dsp_up(void)
 	if (level > 4) {
 		level = 4;
 	}
+	PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150));
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
+	/*
+	 * surya: 30 dB under the TAS2562's 0 dB was far quieter than Android, and 6 dB under it crackled at the top, the
+	 * speakers driven too hard with no protection of the DSP's (3 November 2026). Its default is 12 dB under that 0 dB
+	 * (the guard's limiter and Darwin's own headroom still apply); sound_below=N sets it as anywhere else.
+	 */
+	if (sm7150) {
+		below = 96;
+	}
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
 	PE_parse_boot_argn("sound_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("sound_guard_as", &guard_as, sizeof(guard_as));
@@ -1537,5 +1671,8 @@ hakios_sound_dsp_down(void)
 void
 hakios_sound_quiesce(void)
 {
+	if (sm7150 && hakios_tas256x_quiesce != NULL) {
+		hakios_tas256x_quiesce();
+	}
 	hakios_speaker_quiesce();
 }

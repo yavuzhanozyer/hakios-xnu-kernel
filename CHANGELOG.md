@@ -24,6 +24,10 @@ changes to it; the scripts named fetch the release and put the changes on.
 - loader: the SM7150 known by UEFI's framebuffer at 0x9C000000 (`platform sm7150`: six small cores, two big)
 - mkxnuimg.py, xl: the device from `-d`, `$DEVICE` or the .config, the UEFI's place from the device's Mu-Silicium configuration; redwood as before
 - surya: UEFI platform (Mu-Silicium's suryaPkg with the XNU payload region); nothing of it run on the phone under HakiOS yet
+- surya: the processor clocks through the SM7150's OSM hardware (`cpufreq_osm=1`), the memory vote from its command database (`soc_cmd_db=`)
+- surya: the temperature sensors, every one of both TSENS blocks by number (`thermal_table=2`); the chip's identity (`soc_smem=0x86000000`); the PMIC inventory
+- surya: the battery's level from UEFI's charger drivers, read by the loader as on redwood (`battery=1`)
+- surya: the GPU's, audio DSP's and modem's firmware pulled by `pull-firmware.sh`; GPU, audio and Wi-Fi not yet (devices/surya/README.md says why)
 
 ## 2026-10-30
 

@@ -57,6 +57,9 @@ UBOOT_PAYLOAD ?=
 
 .PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open qemu-u-boot u-boot u-boot-img phone prebuilt clean all doctor defconfig config savedefconfig esp
 
+# every recipe in the C locale: in tr_TR, sed's [A-Za-z] leaves out the capital I (xnu-env.sh says what that broke)
+export LC_ALL := C
+
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
 

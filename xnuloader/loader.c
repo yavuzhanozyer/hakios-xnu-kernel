@@ -561,6 +561,7 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	const char *kernel_args;         /* given to the kernel ahead of the payload's: what this SoC needs that others do not */
 };
 
 static const struct platform platform_qemu_virt = {
@@ -593,13 +594,20 @@ static const struct platform platform_sm7150 = {
 	 * The SM7150 family (the POCO X3 NFC, surya, on Mu-Silicium's suryaPkg): known by UEFI's framebuffer at
 	 * 0x9C000000 ("Display Reserved" of its memory map). The GICv3 is where the SC7280's is (Linux's sm7150.dtsi,
 	 * and the ios-sweet port's device tree for this SoC); the cores are numbered in MPIDR's second affinity field as
-	 * redwood's are: 0-5 Cortex-A55s (1.8 GHz), 6-7 Cortex-A76s (2.3 GHz). The firmware's virtual watchdog and
-	 * charger protocols are redwood's (wdt_arm, charger_start) and are not asked for here.
+	 * redwood's are: 0-5 Cortex-A55s (1.8 GHz), 6-7 Cortex-A76s (2.3 GHz). The firmware's virtual watchdog is
+	 * redwood's hypervisor's (wdt_arm) and is not asked for here; the charger protocols are UEFI's (suryaPkg has
+	 * QcomChargerDxe and ChargerExDxe) and are read as on redwood (charger_start, charger_poll: only reads).
 	 */
 	.name = "sm7150", .io_base = 0x00400000, .io_size = 0x3FC00000,
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	.small_cores = 0x3f,
+	/*
+	 * The timer's interrupt: this SoC numbers its timer PPIs as older Qualcomm SoCs do (the device tree's
+	 * <GIC_PPI 3 ...> is INTID 19 for the virtual timer, not ARM's 27): a kernel waiting on 27 hears no timer and
+	 * stops at its first timed sleep, right after the framebuffer (seen on the POCO X3 NFC, 1 November 2026).
+	 */
+	.kernel_args = "vtimer_intid=19 ",
 };
 
 /* ------------------------------------------------------------------------ */
@@ -2249,7 +2257,8 @@ charger_start(void)
 	static const efi_guid qcom_charger_guid = QCOM_CHARGER_GUID;
 	efi_status ex_status, qcom_status, init_status = 0;
 
-	if (charger_enabled || PLAT != &platform_redwood) {
+	/* the phones whose UEFI carries Qualcomm's charger drivers (redwoodPkg's, and Mu-Silicium's suryaPkg for the SM7150) */
+	if (charger_enabled || (PLAT != &platform_redwood && PLAT != &platform_sm7150)) {
 		return;
 	}
 	ex_status = BS->locate_protocol(&charger_ex_guid, NULL, (void **)&CHARGER_EX);
@@ -3142,6 +3151,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* one processor unless the payload asks for more (of two "cpus=" the kernel takes the first) */
 	if (!more_cores) {
 		for (const char *c = "cpus=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+	}
+	/* what this SoC needs (struct platform), unless the payload says so itself */
+	if (PLAT->kernel_args != NULL) {
+		int own_vtimer = 0;
+
+		for (const char *c = pi.cmdline; *c; c++) {
+			own_vtimer |= starts_with(c, "vtimer_intid=") && (c == pi.cmdline || c[-1] == ' ');
+		}
+		for (const char *c = PLAT->kernel_args; !own_vtimer && *c && n < BOOT_LINE_LENGTH - 1; c++) {
 			ba->commandLine[n++] = *c;
 		}
 	}

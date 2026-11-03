@@ -1,0 +1,7 @@
+# devices/surya/drivers/audio/conf: the POCO X3 NFC's own audio drivers (the format of drivers/audio/conf, docs/drivers-config.md).
+
+driver TAS256X
+	file    bsd/dev/hakios.tas256x.c
+	default n
+	help    the speakers' amplifiers of the POCO X3 NFC, two TI TAS256x on I2C, and their interface (TERT MI2S): step one,
+	help    a look that only reads (tas_probe=N): the pins, the I2C engine. No other phone builds it

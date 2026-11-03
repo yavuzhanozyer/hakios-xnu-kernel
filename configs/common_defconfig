@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 354 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 360 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (26)
+# Drivers built in (27)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -97,11 +97,14 @@ CONFIG_HAKIOS_VIRTIO_BLK=y
 # Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
 CONFIG_HAKIOS_WIFI=y
 
+# the speakers' amplifiers of the POCO X3 NFC, two TI TAS256x on I2C, and their interface (TERT MI2S): step one, a ... [hakios.tas256x.c]
+# CONFIG_HAKIOS_TAS256X is not set
+
 # the touch screen of the POCO X3 NFC: a Novatek NT36672C on SPI (QUPv3 SE0), its firmware sent over SPI from ... [hakios.nt36672c.c]
 # CONFIG_HAKIOS_NT36672C is not set
 
 #
-# CPU, memory and boot (21)
+# CPU, memory and boot (22)
 #
 
 # CPU cores the kernel uses, 1 to 8; one if not set
@@ -118,6 +121,9 @@ CONFIG_HAKIOS_WIFI=y
 
 # read by the patch to Apple's files (kernel)
 # CONFIG_APPLOG_NAME is not set
+
+# the SM7150 family's frequency hardware, two groups (cores 0-5, 6-7), not the EPSS (qcom-cpufreq-hw.c)
+# CONFIG_CPUFREQ_OSM is not set
 
 # every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py ...
 # CONFIG_CPULOAD is not set
@@ -347,7 +353,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (74)
+# GPU and display (76)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -355,6 +361,9 @@ CONFIG_GPU=y
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO is not set
+
+# the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
+# CONFIG_ADRENO_A618 is not set
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO_BLIND is not set
@@ -554,6 +563,9 @@ CONFIG_GPU=y
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_STEP is not set
 
+# read by hakios.adreno.c, hakios.adsp.c, hakios.cpufreq.c, hakios.mpss.c (kernel)
+# CONFIG_SOC_CMD_DB is not set
+
 # kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
 # CONFIG_SURF_CLEAR is not set
 
@@ -573,7 +585,7 @@ CONFIG_GPU=y
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (32)
+# Audio and battery (33)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -611,6 +623,9 @@ CONFIG_SOUND=4
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_RETURN is not set
+
+# the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000, pas-id 1, its memory ...
+# CONFIG_ADSP_SM7150 is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_STEP is not set
@@ -770,7 +785,7 @@ CONFIG_WIFI=y
 # CONFIG_WIFI_WIDE is not set
 
 #
-# Cellular (53)
+# Cellular (52)
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
@@ -899,9 +914,6 @@ CONFIG_MODEM_AGAIN=y
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_WDA_OFF is not set
 
-# read by hakios.mpss.c (kernel)
-# CONFIG_SOC_CMD_DB is not set
-
 # read by hakios.ipa.c (kernel)
 # CONFIG_SOC_GSI_BASE is not set
 
@@ -995,7 +1007,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_TORCH_SECS is not set
 
 #
-# Chip, thermal and PMIC (10)
+# Chip, thermal and PMIC (11)
 #
 
 # read the chip's identity from the firmware's shared memory: kern.hakios.soc_* (SoC number, revision, board)
@@ -1021,6 +1033,9 @@ CONFIG_MODEM_AGAIN=y
 
 # a summary line this often (0: only on a rise; 60)
 # CONFIG_THERMAL_LOG is not set
+
+# every sensor of both blocks by number ("tsens0-03"), for a SoC whose table is not here (the SM7150)
+# CONFIG_THERMAL_TABLE is not set
 
 # read by hakios.thermal.c (kernel)
 # CONFIG_THERMAL_TM0 is not set
@@ -1071,7 +1086,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_USTACKS_TNAME is not set
 
 #
-# Loader (4)
+# Loader (5)
 #
 
 # read by loader.c (loader)
@@ -1085,6 +1100,9 @@ CONFIG_MODEM_AGAIN=y
 
 # read by loader.c (loader)
 # CONFIG_UFS_PROBE is not set
+
+# read by gic_v3_irq.c, loader.c (kernel and loader)
+# CONFIG_VTIMER_INTID is not set
 
 #
 # User space (14)

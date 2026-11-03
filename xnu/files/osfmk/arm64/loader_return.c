@@ -382,6 +382,18 @@ loader_return(void)
 	hakios_camera_quiesce();       /* the camera powered down, if it was powered up */
 	hakios_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
 	/*
+	 * ... and a device's own drivers (devices/<name>/drivers/): one hook, defined by whichever of them has
+	 * something running that must not be left half done for the loader (surya's touch screen: an SPI transfer of
+	 * its serial engine). Weak: a kernel without such a driver has none, and nothing is called.
+	 */
+	{
+		extern void hakios_device_quiesce(void) __attribute__((weak));
+
+		if (hakios_device_quiesce != NULL) {
+			hakios_device_quiesce();
+		}
+	}
+	/*
 	 * A panic's text is first collected in the panic buffer and only later
 	 * flushed to the console; if the console itself is what failed, that
 	 * never happens. Append the buffer so the loader gets it either way.

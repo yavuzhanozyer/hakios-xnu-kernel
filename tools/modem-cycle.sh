@@ -11,7 +11,14 @@ ARGS=$1; SECS=${2:-300}
 # A port's SoC addresses (devices/<name>/soc.args, made by devices/<name>/pull-soc.sh): added to the
 # kernel command line so hakios.mpss.c / hakios.ipa.c map that phone's blocks. SOC_ARGS names the file;
 # default is the one device there is. The POCO's values equal the kernel defaults, so this is a no-op there.
-SOC_ARGS=${SOC_ARGS-$(ls devices/*/soc.args 2>/dev/null | head -1)}
+# The device is $DEVICE, else the .config's CONFIG_DEVICE: another phone's soc.args must never be taken for it (a phone
+# without one, as surya, gets none); only when neither names a device is it the one device there is.
+_dev=${DEVICE:-$( [ -f .config ] && sed -n 's/^CONFIG_DEVICE="\([a-z0-9_]*\)"$/\1/p' .config | head -1)}
+if [ -n "$_dev" ]; then
+	SOC_ARGS=${SOC_ARGS-$( [ -f "devices/$_dev/soc.args" ] && echo "devices/$_dev/soc.args")}
+else
+	SOC_ARGS=${SOC_ARGS-$(ls devices/*/soc.args 2>/dev/null | head -1)}
+fi
 # only what differs from the kernel's built-in defaults: the rest changes nothing, and the command line is short
 . tools/soc-only-changes.sh
 SOC=""; [ -n "$SOC_ARGS" ] && SOC=$(soc_only_changes "$SOC_ARGS" | tr '\n' ' ')

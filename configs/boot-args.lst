@@ -1,4 +1,5 @@
 adreno	k
+adreno_a618	k
 adreno_blind	k
 adreno_dirty	k
 adreno_fine	k
@@ -18,6 +19,7 @@ adsp_listen	k
 adsp_new	k
 adsp_pause	k
 adsp_return	k
+adsp_sm7150	k
 adsp_step	k
 adsp_wait	k
 apfs_cheap	k
@@ -82,6 +84,7 @@ cam_shutter	k
 cam_vblank	k
 cc_fade	u
 cpufreq	k
+cpufreq_osm	k
 cpuload	k
 cpumask	l
 cpus	l
@@ -258,6 +261,7 @@ thermal	k
 thermal_log	k
 thermal_poll	k
 thermal_stop	k
+thermal_table	k
 thermal_tm0	k
 thermal_tm1	k
 torch	kl
@@ -297,6 +301,7 @@ virtio_blk	k
 virtio_input	k
 virtio_net	k
 virtio_sound	k
+vtimer_intid	kl
 wifi	k
 wifi_again	k
 wifi_ask	k

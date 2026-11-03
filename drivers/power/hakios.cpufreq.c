@@ -10,6 +10,12 @@
  * says more).
  *
  * Register layout: Linux drivers/cpufreq/qcom-cpufreq-hw.c ("epss" variant).
+ *
+ * The SM7150 family (the POCO X3 NFC; boot-arg cpufreq_osm=1) has the older hardware of that driver (the
+ * "qcom,cpufreq-hw" variant, OSM firmware behind it): two groups, cores 0-5 and cores 6-7, at 0x18323000 and
+ * 0x18325800 (Linux's sm7150.dtsi, cpufreq@18323000), a table of 40 rows of 32 bytes at 0x110 with the same
+ * word layout, and the wanted row at 0x920. The firmware must have switched the hardware on (bit 0 at 0x0) for
+ * a write there to mean anything; a group where it has not is said and left alone.
  */
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -63,6 +69,17 @@ tell(const char *format, ...)
 #define XO_KHZ                  19200
 #define ALTERNATE_KHZ           300000          /* source 0: a fixed 300 MHz */
 
+/* cpufreq_osm=1: the SM7150 family's frequency hardware, two groups (cores 0-5, 6-7), not the EPSS (qcom-cpufreq-hw.c) */
+#define OSM_DOMAIN0_PHYS        0x18323000UL    /* cores 0-5 */
+#define OSM_DOMAIN1_PHYS        0x18325800UL    /* cores 6-7 */
+#define OSM_DOMAIN_SIZE         0x1400UL
+#define OSM_ENABLE              0x000           /* [0]: the firmware has switched the hardware on */
+#define OSM_FREQ_TABLE          0x110           /* rows of 32 bytes */
+#define OSM_ROW_SIZE            32
+#define OSM_PERF_STATE          0x920
+
+static uint32_t cpufreq_osm;
+
 /* How fast a simple loop runs, in thousands of iterations per millisecond. */
 static uint32_t
 loop_speed(void)
@@ -83,6 +100,9 @@ domain_of(uint32_t phys_id)
 {
 	uint32_t core = (phys_id >> 8) & 0xff;
 
+	if (cpufreq_osm) {
+		return core < 6 ? 0 : 1;
+	}
 	return core < 4 ? 0 : core < 7 ? 1 : 2;
 }
 
@@ -92,9 +112,23 @@ raise_domain(uint32_t domain, uint32_t cores)
 	uint32_t top = 0, top_khz = 0, was;
 	vm_offset_t base;
 
-	base = ml_io_map(EPSS_PHYS + domain * EPSS_DOMAIN_SIZE, EPSS_DOMAIN_SIZE);
+	uint32_t table = EPSS_FREQ_TABLE, row_size = 4, perf_state = EPSS_PERF_STATE;
+
+	if (cpufreq_osm) {
+		base = ml_io_map(domain == 0 ? OSM_DOMAIN0_PHYS : OSM_DOMAIN1_PHYS, OSM_DOMAIN_SIZE);
+		if (!(*(volatile uint32_t *)(base + OSM_ENABLE) & 1)) {
+			tell("cpufreq: group %u: the firmware has not switched the frequency hardware on (%#x): left as it is\n", domain,
+			    *(volatile uint32_t *)(base + OSM_ENABLE));
+			return;
+		}
+		table = OSM_FREQ_TABLE;
+		row_size = OSM_ROW_SIZE;
+		perf_state = OSM_PERF_STATE;
+	} else {
+		base = ml_io_map(EPSS_PHYS + domain * EPSS_DOMAIN_SIZE, EPSS_DOMAIN_SIZE);
+	}
 	for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
-		uint32_t entry = *(volatile uint32_t *)(base + EPSS_FREQ_TABLE + 4 * row);
+		uint32_t entry = *(volatile uint32_t *)(base + table + row_size * row);
 		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
 
 		if (row > 0 && khz <= top_khz) {
@@ -103,8 +137,8 @@ raise_domain(uint32_t domain, uint32_t cores)
 		top = row;
 		top_khz = khz;
 	}
-	was = *(volatile uint32_t *)(base + EPSS_PERF_STATE);
-	*(volatile uint32_t *)(base + EPSS_PERF_STATE) = top;
+	was = *(volatile uint32_t *)(base + perf_state);
+	*(volatile uint32_t *)(base + perf_state) = top;
 	delay_for_interval(20, NSEC_PER_MSEC);
 	tell("cpufreq: group %u (%u of our cores): row %u -> %u of the frequency table, %u MHz\n", domain, cores, was, top,
 	    top_khz / 1000);
@@ -310,6 +344,16 @@ load_start(void)
 #define CMD_DB_SIZE             0x20000UL
 #define CMD_DB_BCM              5               /* the kind of resource in a slave's id: bus clock managers */
 
+/* another SoC's command database (the SM7150's: 0x85f20000): the modem driver's soc_cmd_db, read here too */
+static vm_offset_t
+cmd_db_phys(void)
+{
+	uint32_t phys = (uint32_t)CMD_DB_PHYS;
+
+	PE_parse_boot_argn("soc_cmd_db", &phys, sizeof(phys));
+	return phys;
+}
+
 struct cmd_db_slave {
 	uint16_t id, header_offset, data_offset, count, version, reserved[3];
 };
@@ -345,7 +389,7 @@ static void
 ddr_look(void)
 {
 	/* (memory, not registers: mapped so that reads of any size and alignment are allowed) */
-	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);
+	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(cmd_db_phys(), CMD_DB_SIZE);
 
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		tell("ddr: no command database\n");
@@ -440,7 +484,7 @@ static bool ddr_voted;
 static uint32_t
 cmd_db_address(const char *name)
 {
-	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);
+	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(cmd_db_phys(), CMD_DB_SIZE);
 	char id[8] = { 0 };
 
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
@@ -562,6 +606,8 @@ hakios_cpufreq_init(void)
 	const ml_topology_info_t *topology = ml_get_topology_info();
 	uint32_t enabled = 0, membench = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
+	/* boot-arg cpufreq_osm=1: the SM7150's frequency hardware (two groups, cores 0-5 and 6-7), not the SC7280's EPSS */
+	PE_parse_boot_argn("cpufreq_osm", &cpufreq_osm, sizeof(cpufreq_osm));
 	load_start();
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));

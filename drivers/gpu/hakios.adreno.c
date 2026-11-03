@@ -108,6 +108,17 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
+/*
+ * boot-arg adreno_a618=1: the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
+ * of the a6xx: its clock controller at 0x5090000 (dt qcom,gpucc-sdmmagpie), the GPU at 0x5000000, the GMU at 0x506a000
+ * with an older interface to its firmware. Ported so far: steps 1 and 3 (they read; seen on the phone, 2 November
+ * 2026: CX and GX off, cx_gdscr and gx_gdscr 0x222001, the PLLs off) and step 4 (CX on: the switch and its hw-ctrl
+ * register are where the SC7280's are, gdsc@509106c and syscon@5091540 in surya's device tree; seen on: 0xf8222000)
+ * step 5 (the GMU's clock at 200 MHz from GPLL0's 300 MHz tap, the SMMU's vote; no hub clock) and step 6 (the GMU's
+ * registers at 0x506a000, its always-on counter, the GBIF and cx_misc: reads). The steps after 6 are
+ * the 642L's and are refused, step 2 (fuses at another place) is left out. The command database is soc_cmd_db's.
+ */
+static uint32_t a618;
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
 static char last_write[96] = "nothing written";
 static bool quiet;                      /* repeating accesses that have been announced and seen to work: say nothing */
@@ -283,7 +294,7 @@ wait_for(struct block *b, uint32_t offset, uint32_t mask, uint32_t value, uint32
  * gcc-sc7280.c. The touch screen driver uses this controller too.
  */
 static struct block gcc = { "gcc", 0x00100000, 0x80000 };
-#define GCC_PLL_VOTE            0x52000         /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz) */
+#define GCC_PLL_VOTE            (a618 ? 0x52004 : 0x52000)      /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz); the SM7150's as the SDM845's (gcc-sdm845.c) */
 #define GCC_PLL_VOTE_GPU_DIV    (1u << 16)
 #define GCC_GPU_CFG_AHB_CBCR    0x71004
 #define GCC_GPU_MEMNOC_GFX_CBCR 0x7100c
@@ -329,7 +340,10 @@ rpmh_resource(const char *name, uint16_t *levels, unsigned *level_count)
 		*level_count = 0;
 	}
 	if (db == NULL) {
-		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);  /* memory, not registers */
+		uint32_t phys = (uint32_t)CMD_DB_PHYS;
+
+		PE_parse_boot_argn("soc_cmd_db", &phys, sizeof(phys));     /* another SoC's (the SM7150's: 0x85f20000) */
+		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(phys, CMD_DB_SIZE);  /* memory, not registers */
 	}
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		return 0;
@@ -395,7 +409,7 @@ step_outside(void)
 	get(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
 	get(&gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR);
 
-	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (memory at 0x80860000)");
+	announce("look up the GPU's supply rails in the boot loader's list of RPMh resources (the command database)");
 	show_rpmh_resource("gfx.lvl");          /* the 3D core's own rail (dt: VDD_GFX_LEVEL, PM8350C S7) */
 	show_rpmh_resource("cx.lvl");           /* the rail of the CX half, shared with most of the SoC */
 	show_rpmh_resource("mx.lvl");           /* memories */
@@ -476,7 +490,7 @@ static struct block gpucc = { "gpucc", 0x03d90000, 0x9000 };
 #define GPUCC_HUB_RCGR          0x117c          /* gpu_cc_hub_clk_src */
 #define GPUCC_HUB_CX_INT_CBCR   0x1204          /* gpu_cc_hub_cx_int_clk */
 #define GPUCC_CX_HW_CTRL        0x1540          /* dt: gpu_cx_hw_ctrl: bit 31 is where the vendor's driver sees CX come on */
-#define GPUCC_GX_DOMAIN_MISC    0x158c          /* dt: gpu_gx_domain_addr */
+#define GPUCC_GX_DOMAIN_MISC    (a618 ? 0x1508 : 0x158c)        /* dt: gpu_gx_domain_addr (surya: syscon@5091508) */
 #define GPUCC_SMMU_VOTE_CBCR    0x5000          /* gpu_cc_hlos1_vote_gpu_smmu_clk: our vote for the SMMU's clock */
 
 #define GDSC_SW_COLLAPSE        (1u << 0)       /* a power switch's control register (gdsc.c): off, by software */
@@ -494,7 +508,8 @@ step_gpucc(void)
 		return false;
 	}
 
-	announce("read the GPU's clock controller (0x3d90000) as it is: the first access to the GPU's part of the SoC");
+	announce(a618 ? "read the Adreno 618's clock controller (0x5090000) as it is: the first access to the GPU's part of the SoC" :
+	    "read the GPU's clock controller (0x3d90000) as it is: the first access to the GPU's part of the SoC");
 	get(&gpucc, "cx_gdscr", GPUCC_CX_GDSCR);
 	get(&gpucc, "cx_hw_ctrl", GPUCC_CX_HW_CTRL);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
@@ -658,6 +673,33 @@ step_clocks(void)
 	if (!cx_is_on()) {
 		printf("adreno: %u: CX is off: step 4\n", step);
 		return false;
+	}
+	if (a618) {
+		/*
+		 * The SM7150's GPU clock controller (gpucc-sdmmagpie, as gpucc-sdm845.c and gpucc-sm7150.c have it): the GMU's
+		 * clock from the same 300 MHz tap of GPLL0 (source 6, / 1.5 = 200 MHz), no "hub" and no "cb" clock; the
+		 * GPU's memory clock in GCC is gpu_memnoc_gfx alone (ddrss_gpu_axi reads 0 here: no such clock). The counter
+		 * of step 5's measurement is the SC7280's: left out.
+		 */
+		announce("in the global clock controller: ask for the 300 MHz tap for the GPU (0x52004 bit 16); its bus clocks on");
+		set(&gcc, "pll votes", GCC_PLL_VOTE, GCC_PLL_VOTE_GPU_DIV);
+		if (!clock_on(&gcc, "gpu_memnoc_gfx", GCC_GPU_MEMNOC_GFX_CBCR, false) ||
+		    !clock_on(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR, true)) {
+			return false;
+		}
+		announce("in the Adreno 618's clock controller: the GMU's clock to 200 MHz");
+		if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3))) {
+			return false;
+		}
+		announce("in the Adreno 618's clock controller: the clocks of the GMU and of the SMMU on");
+		if (!clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+		    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
+		    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
+		    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
+			return false;
+		}
+		get(&gpucc, "gmu_clk_src command", GPUCC_GMU_RCGR);
+		return true;
 	}
 	announce("in the global clock controller: ask for the 300 MHz tap for the GPU; the GPU's bus and memory clocks on");
 	set(&gcc, "pll votes", GCC_PLL_VOTE, GCC_PLL_VOTE_GPU_DIV);
@@ -869,6 +911,9 @@ cx_ready(void)
 		    cx_is_on() ? "on" : "off", gmu_clock);
 		return false;
 	}
+	if (a618) {
+		return true;    /* (the SC7280's clock counter is not this SoC's: the clocks' own status bits, as step 5 saw them) */
+	}
 	ahb_hz = measure_quietly(GPUCC_DEBUG_AHB);
 	if (ahb_hz == MEASURE_FAILED) {
 		printf("adreno: %u: the frequency counter did not finish (step 5 shows whether it works)\n", step);
@@ -930,7 +975,8 @@ step_first_words(void)
 	if (!cx_ready()) {
 		return false;
 	}
-	announce("read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
+	announce(a618 ? "read registers of the Adreno 618's GMU (0x506a000): the first words from the GPU block itself" :
+	    "read registers of the GMU (0x3d6a000): the first words from the GPU block itself");
 	get(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET);
 	get(&gmu, "cm3_boot_config", GMU_CM3_BOOT_CONFIG);
 	get(&gmu, "cm3_fw_init_result", GMU_CM3_FW_INIT_RESULT);
@@ -957,7 +1003,8 @@ step_first_words(void)
 		get(&gmu, "dtcm, where firmware has its versions", GMU_DTCM_VERSIONS + 4 * i);
 	}
 
-	announce("read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
+	announce(a618 ? "read the GPU's bus interface (0x500f000) and the CX odds and ends (0x509e000)" :
+	    "read the GPU's bus interface (0x3d0f000) and the CX odds and ends (0x3d9e000)");
 	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
 	get(&gbif, "halt", GBIF_HALT);
 	get(&gbif, "halt_ack", GBIF_HALT_ACK);
@@ -3780,9 +3827,29 @@ hakios_adreno_init(void)
 		keep = 1;
 	}
 	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
+	if (PE_parse_boot_argn("adreno_a618", &a618, sizeof(a618)) && a618) {
+		/* surya's device tree: qcom,gpucc 0x5090000; qcom,gmu kgsl_gmu_reg 0x506a000 (0x31000); kgsl-3d0 at 0x5000000,
+		 * its GBIF at words 0x3c00 on (the 618 has one: adreno_has_gbif()); cx_misc 0x509e000 */
+		gpucc.phys = 0x05090000;
+		gmu.phys = 0x0506a000;
+		gmu.size = 0x31000;
+		gbif.phys = 0x05000000 + 4 * 0x3c00;
+		cx_misc.phys = 0x0509e000;
+		skip_steps |= 1u << 2;                  /* the fuses: where the SM7150 keeps its speed bin is not known here */
+		if (last_step > 6 || by_itself) {
+			printf("adreno: the Adreno 618: only steps 1, 3, 4, 5 and 6 are ported (step 4 switches the CX half on, step 5 "
+			    "the GMU's and SMMU's clocks, step 6 reads the GMU); stopping after step 6\n");
+			last_step = 6;
+			by_itself = false;
+			keep = 0;
+		}
+	}
 	if (PE_parse_boot_argn("adreno_only", &only, sizeof(only)) && only > 0 && only <= STEPS) {
 		last_step = only;
 		skip_steps = ~(1u << only);
+	}
+	if (a618 && last_step > 6) {
+		last_step = 6;                          /* (adreno_only=N past 6: the same refusal) */
 	}
 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("adreno_fine", &fine, sizeof(fine));

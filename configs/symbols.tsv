@@ -1,4 +1,5 @@
 ADRENO	arg	adreno	GPU and display	k	hakios.adreno.c	
+ADRENO_A618	arg	adreno_a618	GPU and display	k	hakios.adreno.c	the SM7150's GPU (the POCO X3 NFC), an Adreno 618 (chip id 0x06010800), the first generation
 ADRENO_BLIND	arg	adreno_blind	GPU and display	k	hakios.adreno.c	
 ADRENO_DIRTY	arg	adreno_dirty	GPU and display	k	hakios.adreno.c	
 ADRENO_FINE	arg	adreno_fine	GPU and display	k	hakios.adreno.c	the newest step waits like that before every single access
@@ -17,6 +18,7 @@ ADSP_LISTEN	arg	adsp_listen	Audio and battery	k	hakios.adsp.c
 ADSP_NEW	arg	adsp_new	Audio and battery	k	hakios.adsp.c	
 ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c	
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
+ADSP_SM7150	arg	adsp_sm7150	Audio and battery	k	hakios.adsp.c,hakios.sound.c	the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000, pas-id 1, its memory reserved-memory
 ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
 ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
 APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
@@ -75,6 +77,7 @@ CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c
 CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
 CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
+CPUFREQ_OSM	arg	cpufreq_osm	CPU, memory and boot	k	hakios.cpufreq.c	the SM7150 family's frequency hardware, two groups (cores 0-5, 6-7), not the EPSS (qcom-cpufreq-hw.c)
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
 DDR	arg	ddr	CPU, memory and boot	k	hakios.cpufreq.c	the memory's bus clock managers ("BCM") in the command database the boot loader left, with what is needed to vote for bandwidth on them -- only read
@@ -204,7 +207,7 @@ ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root vo
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
 SMALL_CORES_AFTER	arg	small_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	
-SOC_CMD_DB	hex	soc_cmd_db	Cellular	k	hakios.mpss.c	
+SOC_CMD_DB	hex	soc_cmd_db	GPU and display	k	hakios.adreno.c,hakios.adsp.c,hakios.cpufreq.c,hakios.mpss.c	
 SOC_GSI_BASE	hex	soc_gsi_base	Cellular	k	hakios.ipa.c	
 SOC_IMEM	hex	soc_imem	Cellular	k	hakios.mpss.c	
 SOC_IPA_BASE	hex	soc_ipa_base	Cellular	k	hakios.ipa.c	
@@ -214,7 +217,7 @@ SOC_IPA_STREAM_UC	arg	soc_ipa_stream_uc	Cellular	k	hakios.mpss.c
 SOC_MPSS_MEM	hex	soc_mpss_mem	Cellular	k	hakios.mpss.c	
 SOC_PAS_IPA	arg	soc_pas_ipa	Cellular	k	hakios.mpss.c	
 SOC_PAS_MPSS	arg	soc_pas_mpss	Cellular	k	hakios.mpss.c	
-SOC_SMEM	hex	soc_smem	Cellular	k	hakios.mpss.c,hakios.socinfo.c	where SMEM is (also the modem driver's argument; 0x80900000 on the reference phone)
+SOC_SMEM	hex	soc_smem	Cellular	k	hakios.adsp.c,hakios.mpss.c,hakios.socinfo.c	where SMEM is (also the modem driver's argument; 0x80900000 on the reference phone)
 SOC_SMEM_SIZE	hex	soc_smem_size	Chip, thermal and PMIC	k	hakios.socinfo.c	
 SOUND_BELOW	arg	sound_below	Audio and battery	k	hakios.sound.c	
 SOUND_GAIN	arg	sound_gain	Audio and battery	k	hakios.sound.c	
@@ -231,6 +234,7 @@ SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)
 SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
 SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)	
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
+THERMAL_TABLE	arg	thermal_table	Chip, thermal and PMIC	k	hakios.thermal.c	every sensor of both blocks by number ("tsens0-03"), for a SoC whose table is not here (the SM7150)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	
 THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c	
 TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
@@ -264,6 +268,7 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
 VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
 VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
 VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
+VTIMER_INTID	arg	vtimer_intid	Loader	kl	gic_v3_irq.c,loader.c	
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	

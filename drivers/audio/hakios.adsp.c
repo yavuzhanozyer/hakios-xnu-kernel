@@ -287,7 +287,24 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the shared memory (hakios.wifi.c, step 1) --------------------------------------------------- */
 
-#define SMEM_PHYS               0x80900000UL
+/*
+ * boot-arg adsp_sm7150=1: the SM7150's audio DSP (the POCO X3 NFC), from surya's device tree: qcom,lpass@62400000,
+ * pas-id 1, its memory reserved-memory pil_adsp_region@95700000 (30 MB), the shared memory at soc_smem (0x86000000).
+ * Its doorbells are not an IPCC's: the APCS's IPC register (syscon@17c0000c, qcom,smp2p-adsp's qcom,ipc bit 26) rings
+ * it, and it rings us with interrupts (SMP2P: SPI 0xac). Ported so far: steps 1 and 2, which read (seen on the phone,
+ * 2 November 2026: our partition at 0x861cf000; the image relocatable, linked at 0x93c00000, whole), and 3 to 5: the
+ * always-on processor's mailbox (msgram 0xc300000 as the SC7280's, its doorbell bit 0 of the APCS IPC register),
+ * TrustZone's PAS calls (image 1), the image written into 0x95700000. Steps 6 on (SMP2P, the start, GLINK) are the
+ * SC7280's and are refused. Then 6 and 7: our SMP2P item, the DSP's rails (lcx.lvl, lmx.lvl from the command database at
+ * soc_cmd_db), "adsp: on" to the always-on processor, TrustZone's authenticate-and-reset, and the DSP's item watched in
+ * the shared memory; the doorbells rung through the APCS. Seen on the phone (2 November 2026): the image written and read
+ * back, TrustZone's authenticate-and-reset, "slave-kernel" 0x6 16 ms later (up, its own power asked for), GLINK's items
+ * 478 and 480 made by the DSP; asked to stop, it acknowledged in 14 ms and was shut down. Steps 8 to 11 (GLINK, QRTR,
+ * APR) as on the SC7280: the link's thread polls the shared memory and needs no doorbell from the DSP.
+ */
+static uint32_t sm7150;
+static uint32_t smem_phys = 0x80900000u;
+#define SMEM_PHYS               ((unsigned long)smem_phys)
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_ADSP               2               /* dt: qcom,remote-pid of qcom,smp2p-adsp and qcom,glink/adsp */
@@ -640,6 +657,9 @@ static struct {
 static void
 doorbells(void)
 {
+	if (sm7150) {
+		return;         /* (no IPCC: the DSP's doorbells are interrupts there, not taken; the shared memory is looked at) */
+	}
 	for (unsigned i = 0; i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
@@ -673,10 +693,42 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 	return rd(aoss.base + offset) == value;
 }
 
+/*
+ * The SM7150 has no IPCC: its doorbells are bits of the APCS's IPC register (syscon@17c0000c in surya's device tree):
+ * bit 0 the always-on processor's (qcom,qmp-aop@c300000, mboxes <&apcs 0>), bit 26 the audio DSP's SMP2P.
+ */
+static struct block apcs = { "apcs", 0x17c00000, 0x1000 };
+#define APCS_IPC                0x0c
+
 static void
 ring_aop(void)
 {
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << 0);
+		return;
+	}
 	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
+}
+
+/*
+ * The audio DSP's doorbells: IPCC client 3 on the SC7280; on the SM7150 bits of the APCS IPC register (surya's device
+ * tree: qcom,smp2p-adsp qcom,ipc <&apcs 0 26>, qcom,glink/adsp mboxes <&apcs 24>). What the DSP rings comes as an
+ * interrupt there, which this driver does not take: it looks at the shared memory instead (doorbells() counts nothing).
+ */
+#define APCS_ADSP_SMP2P         26
+#define APCS_ADSP_GLINK         24
+
+static void
+ring_dsp(uint32_t ipcc_signal)
+{
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << (ipcc_signal == IPCC_GLINK ? APCS_ADSP_GLINK : APCS_ADSP_SMP2P));
+		return;
+	}
+	need(&ipcc);
+	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | ipcc_signal);
 }
 
 /* Linux's qmp_open(), as hakios.wifi.c does it; what is done already is found done. Under the mailbox's lock. */
@@ -686,7 +738,9 @@ mailbox_open(void)
 	uint32_t box, size;
 
 	need(&aoss);
-	need(&ipcc);
+	if (!sm7150) {
+		need(&ipcc);
+	}
 	if (get(&aoss, "magic", QMP_MAGIC) != QMP_MAGIC_VALUE || get(&aoss, "version", QMP_VERSION) != 1) {
 		printf("adsp: %u: not a mailbox this knows\n", step);
 		return false;
@@ -838,7 +892,10 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	char id[8] = { 0 };
 
 	if (cmd_db == NULL) {
-		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(CMD_DB_PHYS, CMD_DB_SIZE, VM_WIMG_WCOMB);
+		uint32_t cmd_db_phys = (uint32_t)CMD_DB_PHYS;
+
+		PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));     /* another SoC's (the SM7150's: 0x85f20000) */
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
 	}
 	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
 		printf("adsp: %u: the boot loader's command database is not there\n", step);
@@ -965,7 +1022,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
-	announce("read our partition with the audio DSP in the shared memory (0x80900000), and its items");
+	announce("read our partition with the audio DSP in the shared memory, and its items");
 	show_partition();
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (443) is there: it has run since the phone was started", &words);
@@ -976,15 +1033,17 @@ step_survey(void)
 	    smem_item(ITEM_SMP2P_OURS, &size) ? "there" : "not there", smem_item(478, &size) ? "there" : "NOT THERE",
 	    smem_item(479, &size) ? "there" : "NOT THERE", smem_item(480, &size) ? "there" : "not there (the DSP makes it)");
 	show_crash_reason();
-	need(&ipcc);
-	printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	if (!sm7150) {
+		need(&ipcc);
+		printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	}
 	return smem_partition(SMEM_US, SMEM_ADSP, &size, &size) != 0;
 }
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY             (sm7150 ? 0x95700000u : 0x86700000u)    /* dt: reserved-memory adsp@86700000 (surya: pil_adsp_region@95700000) */
+#define ADSP_MEMORY_SIZE        (sm7150 ? 0x01e00000u : 0x04000000u)
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
 
@@ -1147,6 +1206,29 @@ step_firmware(void)
 		    first[1], first[2], first[3], count, size);
 		goto fail;
 	}
+	/*
+	 * A relocatable image (a segment with bit 27 of its flags, QCOM_MDT_RELOCATABLE: the SM7150's, linked at 0x93c00000
+	 * with its memory reserved at 0x95700000) goes where its memory is, each segment as far from the start as it is
+	 * from the lowest segment's address (Linux's qcom_mdt_load: mem_reloc). One that is not goes where it is linked.
+	 */
+	uint32_t base = ADSP_MEMORY, linked = ~0u;
+	bool relocatable = false;
+
+	for (uint32_t i = 0; size >= 52 + 32 * (uint64_t)count && i < count; i++) {
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+			continue;
+		}
+		relocatable |= (segment.flags & (1u << 27)) != 0;
+		linked = segment.paddr < linked ? segment.paddr : linked;
+	}
+	if (relocatable && linked != ~0u) {
+		base = linked;
+		if (base != ADSP_MEMORY) {
+			printf("adsp: %u: a relocatable image linked at %#x: loaded at %#x, where the DSP's memory is\n", step, base,
+			    ADSP_MEMORY);
+		}
+	}
 	for (uint32_t i = 0; i < count; i++) {
 		char name[16];
 
@@ -1157,6 +1239,7 @@ step_firmware(void)
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;
 		}
+		segment.paddr = segment.paddr - base + ADSP_MEMORY;     /* (where it goes) */
 		if (segment.paddr < ADSP_MEMORY || segment.file_size > segment.memory_size ||
 		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)ADSP_MEMORY + ADSP_MEMORY_SIZE) {
 			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
@@ -1310,7 +1393,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+		ring_dsp(IPCC_SMP2P);
 	}
 }
 
@@ -1348,7 +1431,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	snprintf(last_write, sizeof(last_write), "step %u asked the audio DSP to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1363,7 +1446,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
@@ -1388,8 +1471,10 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("adsp: %u: THE AUDIO DSP IS SHUT DOWN\n", step);
-	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	if (!sm7150) {
+		need(&ipcc);
+		wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	}
 	doorbells();
 	dsp_started = false;
 	mailbox_send("{class: image, res: load_state, name: adsp, val: off}");
@@ -1470,42 +1555,77 @@ segment_word(unsigned s, uint32_t at)
 	return word;
 }
 
+/* A byte of a segment: of its file, and zero past the file's end (as segment_word()). */
+static uint8_t
+segment_byte(unsigned s, uint32_t at)
+{
+	return at < image.segment[s].file_size ? image.segment[s].file[at] : 0;
+}
+
+/*
+ * A segment into the DSP's memory, or compared with it: eight bytes at a time where the address is a multiple of
+ * eight and eight bytes are left, one at a time elsewhere. The SC7280's images begin and end their segments at such
+ * multiples; the SM7150's do not (seen on surya, 2 November 2026), and the memory takes single bytes as well.
+ */
+static uint64_t
+segment_transfer(volatile uint8_t *memory, unsigned s, bool compare)
+{
+	uint32_t at = image.segment[s].at, size = image.segment[s].memory_size;
+	uint64_t wrong = 0;
+
+	for (uint32_t i = 0; i < size;) {
+		if (((at + i) & 7) == 0 && size - i >= 8) {
+			volatile uint64_t *word = (volatile uint64_t *)(memory + at + i);
+
+			if (compare) {
+				wrong += *word != segment_word(s, i);
+			} else {
+				*word = segment_word(s, i);
+			}
+			i += 8;
+		} else {
+			if (compare) {
+				wrong += memory[at + i] != segment_byte(s, i);
+			} else {
+				memory[at + i] = segment_byte(s, i);
+			}
+			i++;
+		}
+	}
+	return wrong;
+}
+
 static bool
 step_image(void)
 {
-	volatile uint64_t *dsp_memory;
+	volatile uint8_t *dsp_memory;
 	uint64_t written = 0, cleared = 0, wrong = 0;
+	char what[200];
 
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
-	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
+	snprintf(what, sizeof(what), "put the image's segments into the audio DSP's memory (%#x, %u MB: memory of nobody's until "
+	    "TrustZone starts the DSP), with zeroes where a segment is longer than its file, and read them back", ADSP_MEMORY,
+	    ADSP_MEMORY_SIZE >> 20);
+	announce(what);
+	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
 	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
 	for (unsigned s = 0; s < image.segments; s++) {
-		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
-
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if ((uint64_t)image.segment[s].at + image.segment[s].memory_size > ADSP_MEMORY_SIZE) {
+			printf("adsp: %u: segment %u goes past the DSP's memory: not written\n", step, s);
 			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
 			return false;
 		}
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
-			to[i / 8] = segment_word(s, i);
-		}
+		segment_transfer(dsp_memory, s, false);
 		written += image.segment[s].file_size;
 		cleared += image.segment[s].memory_size - image.segment[s].file_size;
 	}
 	settle();
 	for (unsigned s = 0; s < image.segments; s++) {
-		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
-
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
-			wrong += from[i / 8] != segment_word(s, i);
-		}
+		wrong += segment_transfer(dsp_memory, s, true);
 	}
-	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step,
+	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words or bytes differ\n", step,
 	    image.segments, written, cleared, wrong);
 	settle();
 	ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
@@ -1522,18 +1642,18 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
 
 /* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.wifi.c: our_item_make()). */
 static bool
-our_item_make(uint32_t partition)
+item_make(uint32_t partition, uint16_t item, uint32_t bytes)
 {
 	struct smem_partition header;
 	struct smem_entry entry;
-	const uint32_t item_size = (sizeof(struct smp2p) + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
+	const uint32_t item_size = (bytes + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
 	uint32_t owner = ~0u, at;
 	bool made = false;
 
 	lck_mtx_lock(&hakios_smem_alloc_lock);         /* (the Wi-Fi's start allocates under the same hardware lock) */
 	need(&smem_lock);
 	printf("adsp: %u: about to take the lock (%#x), write an entry for item %u with %u bytes behind it at the partition's mark, "
-	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, ITEM_SMP2P_OURS, item_size, need_bytes);
+	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, item, item_size, need_bytes);
 	snprintf(last_write, sizeof(last_write), "step %u took the shared memory's lock", step);
 	for (uint32_t ms = 0; ms <= 1000; ms++) {
 		wr(smem_lock.base + LOCK_OWNER, LOCK_US);
@@ -1554,7 +1674,7 @@ our_item_make(uint32_t partition)
 		goto out;
 	}
 	for (at = sizeof(header); at < header.free_uncached;) {
-		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == ITEM_SMP2P_OURS ||
+		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == item ||
 		    entry.size > header.size) {
 			break;
 		}
@@ -1569,9 +1689,9 @@ our_item_make(uint32_t partition)
 		printf("adsp: %u: no room: %u bytes wanted, %u free: nothing is written\n", step, need_bytes, header.free_cached - at);
 		goto out;
 	}
-	smem_poke(partition + at, SMEM_CANARY | ITEM_SMP2P_OURS << 16);
+	smem_poke(partition + at, SMEM_CANARY | (uint32_t)item << 16);
 	smem_poke(partition + at + 4, item_size);
-	smem_poke(partition + at + 8, item_size - (uint32_t)sizeof(struct smp2p));
+	smem_poke(partition + at + 8, item_size - bytes);
 	smem_poke(partition + at + 12, 0);
 	settle();
 	smem_poke(partition + __offsetof(struct smem_partition, free_uncached), at + need_bytes);
@@ -1582,6 +1702,12 @@ out:
 	printf("adsp: %u: the lock is released (it reads %u)\n", step, rd(smem_lock.base + LOCK_OWNER));
 	lck_mtx_unlock(&hakios_smem_alloc_lock);
 	return made;
+}
+
+static bool
+our_item_make(uint32_t partition)
+{
+	return item_make(partition, ITEM_SMP2P_OURS, sizeof(struct smp2p));
 }
 
 static void glink_reset(void);
@@ -1633,7 +1759,7 @@ step_our_item(void)
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
 	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring_dsp(IPCC_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("adsp: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -1671,12 +1797,14 @@ step_start(void)
 	have = dsp_words(&last);
 	announce("listen for the audio DSP's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
-	need(&ipcc);
-	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
-		put(&ipcc, "heard", IPCC_CLEAR, rang);
+	if (!sm7150) {
+		need(&ipcc);
+		for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
+			put(&ipcc, "heard", IPCC_CLEAR, rang);
+		}
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	}
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
 	if (!rails(384)) {
@@ -1971,7 +2099,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+	ring_dsp(IPCC_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2213,7 +2341,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+			ring_dsp(IPCC_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -2992,6 +3120,8 @@ link_stop(void)
 
 /* ---- step 8: GLINK's queues, looked at -------------------------------------------------------------- */
 
+#define GLINK_OUR_QUEUE_SIZE    16384           /* qcom_glink_smem.c: SZ_16K for the transmit FIFO */
+
 static bool
 step_queues(void)
 {
@@ -2999,6 +3129,18 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the audio DSP has put into its own");
+	/*
+	 * Our queue (item 479), where the SC7280's DSP has made it and the SM7150's has not (it makes the descriptor and its
+	 * own queue, 478 and 480; Linux's glink_smem allocates 479 itself, 16 KB, as here): made in our partition with it.
+	 */
+	if (!glink_find() && glink.descriptor != 0 && glink.theirs != 0 && glink.ours == 0) {
+		uint32_t cacheline = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &size);
+
+		printf("adsp: %u: our queue (item 479) is not there: it is made, %u bytes, as Linux makes it\n", step, GLINK_OUR_QUEUE_SIZE);
+		if (partition == 0 || !item_make(partition, 479, GLINK_OUR_QUEUE_SIZE)) {
+			return false;
+		}
+	}
 	if (!glink_find()) {
 		printf("adsp: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);
@@ -3271,6 +3413,12 @@ hakios_adsp_init(void)
 	if (pe_arm_get_soc_base_phys() != HAKIOS_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
 		return;
+	}
+	if (PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
+		PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
+		/* all eleven steps: the link's thread looks at the shared memory every millisecond, doorbells or not */
+		printf("adsp: the SM7150's audio DSP (adsp_sm7150=1): its memory at %#x, the shared memory at %#x, doorbells through "
+		    "the APCS\n", ADSP_MEMORY, smem_phys);
 	}
 	if (last_step == 0) {
 		/* all of it, on a thread of its own, and left up */
