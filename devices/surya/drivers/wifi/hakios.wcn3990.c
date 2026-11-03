@@ -436,6 +436,10 @@ mission(void)
 #define SMMU_S2CR(n)            (0xc00 + 4 * (n))
 #define SMMU_S2CR_BYPASS        (1u << 16)
 #define SMMU_S2CR_FAULT_DEFAULT 0x200ffu
+#define SMMU_IDR1               0x024           /* [7:0] context banks */
+#define SMMU_CBAR(n)            (0x1000 + 4 * (n))      /* (in the second page of global registers) */
+#define SMMU_CBAR_S1_BYPASS_S2  (1u << 16)      /* CBAR_TYPE_S1_TRANS_S2_BYPASS */
+#define SMMU_CB_SCTLR(n)        (0x80000 + 0x1000 * (n))
 #define WLAN_STREAM             0x240u
 #define WLAN_STREAM_MASK        0x1u
 
@@ -484,12 +488,43 @@ smmu_bypass(void)
 		}
 	}
 	if (!done && free_one != ~0u) {
+		/*
+		 * Linux's arm-smmu-qcom.c: Qualcomm's hypervisor may not allow "bypass" in a stream-to-context register; it is
+		 * written, read back, and if it does not hold, the stream goes instead to a context bank whose translation is off
+		 * (the last one, as Linux takes it: CBAR "stage 1 translate, stage 2 bypass", SCTLR 0).
+		 */
+		uint32_t back;
+
 		say("wcn3990: 11: about to let the WLAN's stream %#x/%#x through the SMMU untranslated: match register %u, s2cr bypass\n",
 		    WLAN_STREAM, WLAN_STREAM_MASK, free_one);
+		delay_for_interval(1500, NSEC_PER_MSEC);
 		*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = SMMU_S2CR_BYPASS;
 		__asm__ volatile ("dsb sy" ::: "memory");
+		back = *(volatile uint32_t *)(smmu + SMMU_S2CR(free_one));
+		say("wcn3990: 11: s2cr %u reads %#x after the write%s\n", free_one, back, (back & (3u << 16)) == SMMU_S2CR_BYPASS ?
+		    "" : ": bypass not allowed, a context bank with translation off instead");
+		if ((back & (3u << 16)) != SMMU_S2CR_BYPASS) {
+			vm_offset_t banks = ml_io_map(SMMU_PHYS, 0x80000 + 0x1000 * 128);
+			uint32_t cb = (*(volatile uint32_t *)(smmu + SMMU_IDR1) & 0xff) - 1;
+
+			say("wcn3990: 11: context bank %u: cbar %#x, sctlr %#x\n", cb, *(volatile uint32_t *)(banks + SMMU_CBAR(cb)),
+			    *(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)));
+			if (*(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)) & 1) {
+				say("wcn3990: 11: it translates (in use): the stream is left as it was\n");
+				*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = SMMU_S2CR_FAULT_DEFAULT;
+				lck_mtx_unlock(&hakios_smmu_lock);
+				return false;
+			}
+			*(volatile uint32_t *)(banks + SMMU_CBAR(cb)) = SMMU_CBAR_S1_BYPASS_S2;
+			*(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)) = 0;
+			*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = cb;        /* type 0 (translate) to that bank */
+			__asm__ volatile ("dsb sy" ::: "memory");
+			say("wcn3990: 11: s2cr %u now %#x (context bank %u, translation off)\n", free_one,
+			    *(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)), cb);
+		}
 		*(volatile uint32_t *)(smmu + SMMU_SMR(free_one)) = 1u << 31 | WLAN_STREAM_MASK << 16 | WLAN_STREAM;
 		__asm__ volatile ("dsb sy" ::: "memory");
+		say("wcn3990: 11: smr %u now %#x\n", free_one, *(volatile uint32_t *)(smmu + SMMU_SMR(free_one)));
 		done = true;
 	} else if (!done) {
 		say("wcn3990: 11: no free match register in the SMMU (%u of them)\n", count);
@@ -549,18 +584,39 @@ copy_engines(void)
 	uint32_t seconds = 10, seen = 0;
 	uint64_t began;
 
+	uint32_t part = 9;
+
 	PE_parse_boot_argn("wcn3990_htc", &seconds, sizeof(seconds));
-	if (!smmu_bypass()) {
+	/* wcn3990_ce=N stops after part N: 1 the WLAN's registers read, 2 our DMA memory zeroed, 3 the SMMU, then the rest */
+	PE_parse_boot_argn("wcn3990_ce", &part, sizeof(part));
+	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
+	delay_for_interval(1500, NSEC_PER_MSEC);
+	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
+	if (wlan == NULL) {
+		say("wcn3990: 11: the WLAN's registers cannot be mapped\n");
 		return;
 	}
-	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
+	say("wcn3990: 11: the WLAN's registers answer: CE1 ctrl1 %#x, dst size %#x\n", wl_rd(CE_BASE(1) + CE_CTRL1),
+	    wl_rd(CE_BASE(1) + CE_DR_SIZE));
+	if (part <= 1) {
+		return;
+	}
+	say("wcn3990: 11: about to zero our DMA memory (%#x bytes at %#llx)\n", CE_DMA_SIZE, CE_DMA_PHYS);
+	delay_for_interval(1500, NSEC_PER_MSEC);
 	dma = (volatile uint8_t *)ml_io_map_unmappable(CE_DMA_PHYS, CE_DMA_SIZE, VM_WIMG_WCOMB);
-	if (wlan == NULL || dma == NULL) {
-		say("wcn3990: 11: the WLAN's registers or our DMA memory cannot be mapped\n");
+	if (dma == NULL) {
+		say("wcn3990: 11: our DMA memory cannot be mapped\n");
 		return;
 	}
 	for (uint32_t i = 0; i < CE_DMA_SIZE; i += 8) {
 		*(volatile uint64_t *)(dma + i) = 0;
+	}
+	say("wcn3990: 11: our DMA memory is zeroed\n");
+	if (part <= 2) {
+		return;
+	}
+	if (!smmu_bypass() || part <= 3) {
+		return;
 	}
 	say("wcn3990: 11: the copy engines before: CE0 ctrl1 %#x, CE1 ctrl1 %#x, CE1 dst size %#x, CE1 drri %#x, wrapper rri %#x %#x\n",
 	    wl_rd(CE_BASE(0) + CE_CTRL1), wl_rd(CE_BASE(1) + CE_CTRL1), wl_rd(CE_BASE(1) + CE_DR_SIZE),
