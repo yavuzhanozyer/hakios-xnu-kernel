@@ -585,9 +585,10 @@ show_htc(unsigned ce, const volatile uint8_t *data, unsigned length)
 static void
 rails_on(void)
 {
+	/* (surya's Android, icnss.c: icnss_vreg_info's order, cx-mx at the tree's qcom,vdd-cx-mx-config, the rest at its values) */
 	static const struct { const char *rail, *resource; uint32_t millivolts; } rails[] = {
-		{ "vdd-cx-mx", "ldoa9", 640 }, { "vdd-1.8-xo", "ldoc1", 1800 }, { "vdd-1.3-rfa", "ldoc2", 1300 },
-		{ "vdd-3.3-ch0", "ldoc10", 3300 }, { "vdd-3.3-ch1", "ldoc11", 3300 },
+		{ "vdd-cx-mx", "ldoa9", 640 }, { "vdd-1.8-xo", "ldoc1", 1800 }, { "vdd-1.3-rfa", "ldoc2", 1304 },
+		{ "vdd-3.3-ch1", "ldoc11", 3312 }, { "vdd-3.3-ch0", "ldoc10", 3312 },
 	};
 	uint32_t on = 1;
 
@@ -598,7 +599,7 @@ rails_on(void)
 	for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]); i++) {
 		int ret = hakios_mpss_regulator(rails[i].resource, rails[i].millivolts, 7, true);
 
-		say("wcn3990: 11: the chip's rail %s (%s, %u mV): %s (%d)\n", rails[i].rail, rails[i].resource, rails[i].millivolts,
+		say("wcn3990: 0: the chip's rail %s (%s, %u mV): %s (%d)\n", rails[i].rail, rails[i].resource, rails[i].millivolts,
 		    ret == 0 ? "on" : "NOT ASKED", ret);
 		delay_for_interval(2, NSEC_PER_MSEC);
 	}
@@ -618,7 +619,6 @@ copy_engines(void)
 	PE_parse_boot_argn("wcn3990_htc", &seconds, sizeof(seconds));
 	/* wcn3990_ce=N stops after part N: 1 the WLAN's registers read, 2 our DMA memory zeroed, 3 the SMMU, then the rest */
 	PE_parse_boot_argn("wcn3990_ce", &part, sizeof(part));
-	rails_on();
 	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
 	delay_for_interval(1500, NSEC_PER_MSEC);
 	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
@@ -731,6 +731,11 @@ exchange(void)
 		    WLFW_SERVICE_VERS_V01, ret);
 		goto out;
 	}
+	/*
+	 * 0: the chip's rails, where surya's Android has them up (icnss.c, icnss_driver_event_server_arrive(): power on, then
+	 * the indications); with them up only after the mode, the copy engines' registers did not answer (3 November 2026)
+	 */
+	rails_on();
 
 	/* 1: ath10k_qmi_ind_register_send_sync_msg() */
 	bzero(&indications, sizeof(indications));
