@@ -893,13 +893,37 @@ amp_reset(unsigned a)
 	if (!amp_write(a, "book 0", TAS_BOOK, 0) || !amp_write(a, "software reset", TAS_SW_RESET, 1)) {
 		return false;
 	}
-	delay_for_interval(2, NSEC_PER_MSEC);
-	if (!amp_write(a, "page 0", TAS_PAGE, 0) || !amp_read(a, TAS_REV_ID, &revision)) {
-		return false;
+	/*
+	 * The revision, asked again while it reads 0: the left one, just out of its PMIC reset, read 0 once (3 November
+	 * 2026) where the right one reads 0x10. What else it holds is shown, to tell an amplifier still waking from one
+	 * that is not powered (everything 0) or not a TAS2562.
+	 */
+	for (unsigned tries = 0; tries < 10; tries++) {
+		delay_for_interval(tries == 0 ? 2 : 10, NSEC_PER_MSEC);
+		if (!amp_write(a, "page 0", TAS_PAGE, 0) || !amp_read(a, TAS_REV_ID, &revision)) {
+			return false;
+		}
+		if ((revision & 0xf0) == 0x10) {
+			break;
+		}
 	}
 	if ((revision & 0xf0) != 0x10) {
-		say("tas256x: the %s amplifier's revision %#x is not a TAS2562's: not used\n", amp_name[a], revision);
-		return false;
+		uint8_t r[6] = { 0 };
+		static const uint8_t regs[6] = { TAS_SW_RESET, TAS_PWR_CTL, 0x03, TAS_TDM_CFG0, TAS_TDM_CFG1, TAS_TDM_CFG2 };
+		uint32_t force = 0;
+
+		for (unsigned i = 0; i < 6; i++) {
+			(void)amp_read(a, regs[i], &r[i]);
+		}
+		say("tas256x: the %s amplifier's revision %#x after 100 ms; 0x01 %#x, 0x02 %#x, 0x03 %#x, 0x06 %#x, 0x07 %#x, 0x08 %#x%s\n",
+		    amp_name[a], revision, r[0], r[1], r[2], r[3], r[4], r[5],
+		    (r[1] | r[2] | r[3] | r[4] | r[5]) == 0 ? " (all 0: not powered, or not awake?)" : "");
+		PE_parse_boot_argn("tas_force", &force, sizeof(force));
+		if (!force) {
+			say("tas256x: not a TAS2562 by its revision: not used (tas_force=1 uses it all the same)\n");
+			return false;
+		}
+		say("tas256x: tas_force=1: used all the same\n");
 	}
 	return amp_write(a, "shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
 }
