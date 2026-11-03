@@ -202,6 +202,7 @@ modem_share_off	k
 modem_share_test	k
 modem_sim_probe_off	k
 modem_sim_switch_off	k
+modem_sm7150	k
 modem_step	k
 modem_wait	k
 modem_wda_off	k
@@ -237,6 +238,7 @@ soc_ipa_fw	k
 soc_ipa_stream	k
 soc_ipa_stream_uc	k
 soc_mpss_mem	k
+soc_mpss_size	k
 soc_pas_ipa	k
 soc_pas_mpss	k
 soc_smem	k

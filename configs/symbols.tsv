@@ -184,6 +184,7 @@ MODEM_SHARE_OFF	arg	modem_share_off	Cellular	k	hakios.mpss.c
 MODEM_SHARE_TEST	arg	modem_share_test	Cellular	k	hakios.mpss.c	
 MODEM_SIM_PROBE_OFF	arg	modem_sim_probe_off	Cellular	k	hakios.mpss.c	
 MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c	
+MODEM_SM7150	arg	modem_sm7150	Cellular	k	hakios.mpss.c	the SM7150's modem (the POCO X3 NFC), from surya's device tree: qcom,mss@4080000, pas-id 4
 MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
 MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
 MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
@@ -215,6 +216,7 @@ SOC_IPA_FW	arg	soc_ipa_fw	Cellular	k	hakios.mpss.c
 SOC_IPA_STREAM	arg	soc_ipa_stream	Cellular	k	hakios.mpss.c	
 SOC_IPA_STREAM_UC	arg	soc_ipa_stream_uc	Cellular	k	hakios.mpss.c	
 SOC_MPSS_MEM	hex	soc_mpss_mem	Cellular	k	hakios.mpss.c	
+SOC_MPSS_SIZE	hex	soc_mpss_size	Cellular	k	hakios.mpss.c	
 SOC_PAS_IPA	arg	soc_pas_ipa	Cellular	k	hakios.mpss.c	
 SOC_PAS_MPSS	arg	soc_pas_mpss	Cellular	k	hakios.mpss.c	
 SOC_SMEM	hex	soc_smem	Cellular	k	hakios.adsp.c,hakios.mpss.c,hakios.socinfo.c	where SMEM is (also the modem driver's argument; 0x80900000 on the reference phone)

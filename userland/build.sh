@@ -611,8 +611,11 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
-			--node /soc/qcom,mss@4080000 >/dev/null
+		# checked against the device tree of the phone being built for (the .config's CONFIG_DEVICE; redwood without one)
+		_dev=$( [ -f ../.config ] && sed -n 's/^CONFIG_DEVICE="\([a-z0-9_]*\)"$/\1/p' ../.config | head -1)
+		_check=../devices/${_dev:-redwood}/tools/modem_firmware.py; [ -f $_check ] || _check=../devices/redwood/tools/modem_firmware.py
+		$_check --dtb ../devices/${_dev:-redwood}/prebuilt/device-tree.dtb \
+			--firmware-dir ../fw-modem --node /soc/qcom,mss@4080000 >/dev/null
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
 		# ... and the firmware partition's image/ (its mcfg configurations and the registry's *.jsn, pulled from

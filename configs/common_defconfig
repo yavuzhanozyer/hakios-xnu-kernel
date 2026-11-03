@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 360 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 362 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -785,7 +785,7 @@ CONFIG_WIFI=y
 # CONFIG_WIFI_WIDE is not set
 
 #
-# Cellular (52)
+# Cellular (54)
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
@@ -905,6 +905,9 @@ CONFIG_MODEM_AGAIN=y
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_SIM_SWITCH_OFF is not set
 
+# the SM7150's modem (the POCO X3 NFC), from surya's device tree: qcom,mss@4080000, pas-id 4
+# CONFIG_MODEM_SM7150 is not set
+
 # the steps once the root is there, then back to the loader if modem_return=1 says so
 # CONFIG_MODEM_STEP is not set
 
@@ -934,6 +937,9 @@ CONFIG_MODEM_AGAIN=y
 
 # read by hakios.mpss.c (kernel)
 # CONFIG_SOC_MPSS_MEM is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_MPSS_SIZE is not set
 
 # read by hakios.mpss.c (kernel)
 # CONFIG_SOC_PAS_IPA is not set
