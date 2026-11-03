@@ -880,6 +880,18 @@ amp_volume_set(uint32_t below_now)
 	return true;
 }
 
+/*
+ * Its power register's low four bits (the mode and the sense) set, the rest kept as the amplifier has them: the left
+ * one reads 0x8e after its reset where the right one reads 0x0e, and what its bit 7 does is not known.
+ */
+static uint8_t amp_power_high[AMPS];
+
+static bool
+amp_power(unsigned a, const char *what, uint8_t low)
+{
+	return amp_write(a, what, TAS_PWR_CTL, (uint8_t)(amp_power_high[a] | low));
+}
+
 /* One amplifier found and reset; false if it is not there or not a TAS2562. */
 static bool
 amp_reset(unsigned a)
@@ -919,13 +931,28 @@ amp_reset(unsigned a)
 		    amp_name[a], revision, r[0], r[1], r[2], r[3], r[4], r[5],
 		    (r[1] | r[2] | r[3] | r[4] | r[5]) == 0 ? " (all 0: not powered, or not awake?)" : "");
 		PE_parse_boot_argn("tas_force", &force, sizeof(force));
-		if (!force) {
+		/*
+		 * Seen on the left one (3 November 2026): revision 0, but 0x06-0x08 at a TAS256x's values after a reset
+		 * (0x09 0x02 0x0a, the right one's too) and 0x02 at 0x8e: an amplifier of this family, awake.
+		 */
+		if (r[3] == 0x09 && r[4] == 0x02 && r[5] == 0x0a) {
+			say("tas256x: its TDM configuration is a TAS256x's after a reset: used\n");
+		} else if (!force) {
 			say("tas256x: not a TAS2562 by its revision: not used (tas_force=1 uses it all the same)\n");
 			return false;
+		} else {
+			say("tas256x: tas_force=1: used all the same\n");
 		}
-		say("tas256x: tas_force=1: used all the same\n");
 	}
-	return amp_write(a, "shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+	{
+		uint8_t power = 0;
+
+		if (!amp_read(a, TAS_PWR_CTL, &power)) {
+			return false;
+		}
+		amp_power_high[a] = power & 0xf0;
+	}
+	return amp_power(a, "shut down", TAS_PWR_SHUTDOWN);
 }
 
 /* Its interface: I2S, 48 kHz, 24 bits in 32, its channel (1 left, 2 right, 3 the average). */
@@ -994,7 +1021,7 @@ hakios_tas256x_start(void)
 		return false;
 	}
 	for (unsigned a = 0; a < AMPS; a++) {
-		if (amp_present[a] && !amp_write(a, "powered up, active", TAS_PWR_CTL, TAS_PWR_ACTIVE)) {
+		if (amp_present[a] && !amp_power(a, "powered up, active", TAS_PWR_ACTIVE)) {
 			hakios_tas256x_quiesce();
 			return false;
 		}
@@ -1072,7 +1099,7 @@ hakios_tas256x_stop(void)
 		(void)hakios_tas256x_volume(TAS_MUTED, 20);
 		for (unsigned a = 0; a < AMPS; a++) {
 			if (amp_present[a]) {
-				(void)amp_write(a, "shut down", TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+				(void)amp_power(a, "shut down", TAS_PWR_SHUTDOWN);
 			}
 		}
 		amp_on = false;
@@ -1102,7 +1129,7 @@ hakios_tas256x_quiesce(void)
 	if (amp_on) {
 		for (unsigned a = 0; a < AMPS; a++) {
 			if (amp_present[a]) {
-				(void)tas_write(amp_address[a], TAS_PWR_CTL, TAS_PWR_SHUTDOWN);
+				(void)tas_write(amp_address[a], TAS_PWR_CTL, (uint8_t)(amp_power_high[a] | TAS_PWR_SHUTDOWN));
 			}
 		}
 		amp_on = false;
