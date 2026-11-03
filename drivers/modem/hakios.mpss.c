@@ -5058,6 +5058,15 @@ ipa_qmi_start(void)
 	if (option("modem_no_ipa_qmi")) {
 		return false;
 	}
+	/*
+	 * Not on the SM7150 unless modem_ipa_qmi=1: its IPA (v4.2) has no hashed tables, and the SC7280's "initialize your
+	 * driver" with them killed its modem (3 November 2026: "ipa_qmi_server.c:418: IPA Assert: (init_req->
+	 * v4_hash_route_tbl_info_valid == 0) && ... failed"); no IPA runs there anyway.
+	 */
+	if (sm7150 && !option("modem_ipa_qmi")) {
+		printf("mpss: ipa: the SM7150's modem is not spoken to about the IPA (modem_ipa_qmi=1 would)\n");
+		return false;
+	}
 	if (ipa_host_port == NULL) {
 		ipa_host_port = qrtr_open(ipa_host_receive, NULL, NULL);
 	}

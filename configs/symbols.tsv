@@ -162,6 +162,7 @@ MODEM_IPA_FW_AT	arg	modem_ipa_fw_at	Cellular	k	hakios.mpss.c
 MODEM_IPA_GSI_ENABLE	arg	modem_ipa_gsi_enable	Cellular	k	hakios.mpss.c	
 MODEM_IPA_ITEM	arg	modem_ipa_item	Cellular	k	hakios.mpss.c	
 MODEM_IPA_NO_PROBE	arg	modem_ipa_no_probe	Cellular	k	hakios.mpss.c	
+MODEM_IPA_QMI	arg	modem_ipa_qmi	Cellular	k	hakios.mpss.c	
 MODEM_IPA_QUIET	arg	modem_ipa_quiet	Cellular	k	hakios.mpss.c	
 MODEM_IPA_RAW	arg	modem_ipa_raw	Cellular	k	hakios.mpss.c	
 MODEM_IPA_ROUTES	arg	modem_ipa_routes	Cellular	k	hakios.mpss.c	

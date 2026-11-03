@@ -180,6 +180,7 @@ modem_ipa_fw_at	k
 modem_ipa_gsi_enable	k
 modem_ipa_item	k
 modem_ipa_no_probe	k
+modem_ipa_qmi	k
 modem_ipa_quiet	k
 modem_ipa_raw	k
 modem_ipa_routes	k
