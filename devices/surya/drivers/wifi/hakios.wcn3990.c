@@ -18,6 +18,10 @@
  *   7  the calibration report (none)
  *   8  "firmware ready" waited for (wcn3990_wait seconds, default 15)
  *
+ * Seen on the phone (3 November 2026): every request answered with success, the MSA memory in two regions (16 KB secure at
+ * 0x97500000, the rest not) given by TrustZone, chip id 0x30214 (family 0x4001), no board id (so bdwlan.bin, 26 KB, in 5
+ * pieces), firmware WLAN.HL.3.2.2-00650 of 15 August 2021, and "firmware ready" 3.9 s after the exchange began.
+ *
  * Nothing after that: the mode, the copy engines' configuration and the radio's driver (ath10k's snoc.c) are the steps to
  * come. The chip's rails (vdd-1.8-xo, vdd-1.3-rfa, vdd-3.3-ch0/1, vdd-cx-mx) are as the boot loader leaves them.
  *
