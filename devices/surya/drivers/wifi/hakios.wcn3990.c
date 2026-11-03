@@ -17,6 +17,8 @@
  *      the last piece is no matter, as in ath10k
  *   7  the calibration report (none)
  *   8  "firmware ready" waited for (wcn3990_wait seconds, default 15)
+ *   9  (wcn3990=2) the configuration: snoc.c's copy engine pipes, the map of HTC services to them, the shadow registers
+ *  10  (wcn3990=2) the mode "mission": the radio on, waiting for its driver at the copy engines
  *
  * Seen on the phone (3 November 2026): every request answered with success, the MSA memory in two regions (16 KB secure at
  * 0x97500000, the rest not) given by TrustZone, chip id 0x30214 (family 0x4001), no board id (so bdwlan.bin, 26 KB, in 5
@@ -320,6 +322,66 @@ board_data(uint32_t board_id)
 	return ok;
 }
 
+/*
+ * ath10k_snoc_wlan_enable() and ath10k_qmi_wlan_enable(): the configuration -- the copy engines' pipes, which HTC service
+ * goes through which, the shadow registers, snoc.c's three tables for the WCN3990 -- then the mode "mission", after which
+ * the firmware has the radio on and waits for its driver at the copy engines (the steps to come). wcn3990=2.
+ */
+static bool in_mission;
+
+static bool
+mission(void)
+{
+	static struct wlfw_wlan_cfg_req_msg_v01 config;
+	struct wlfw_wlan_cfg_resp_msg_v01 config_reply;
+	struct wlfw_wlan_mode_req_msg_v01 mode;
+	struct wlfw_wlan_mode_resp_msg_v01 mode_reply;
+	const unsigned pipes = sizeof(target_ce_config_wlan) / sizeof(target_ce_config_wlan[0]);
+	const unsigned services = sizeof(target_service_to_ce_map_wlan) / sizeof(target_service_to_ce_map_wlan[0]);
+	const unsigned shadows = sizeof(target_shadow_reg_cfg_map) / sizeof(target_shadow_reg_cfg_map[0]);
+
+	bzero(&config, sizeof(config));
+	config.tgt_cfg_valid = 1;
+	config.tgt_cfg_len = pipes > QMI_WLFW_MAX_NUM_CE_V01 ? QMI_WLFW_MAX_NUM_CE_V01 : pipes;
+	for (unsigned i = 0; i < config.tgt_cfg_len; i++) {
+		config.tgt_cfg[i].pipe_num = target_ce_config_wlan[i].pipenum;
+		config.tgt_cfg[i].pipe_dir = target_ce_config_wlan[i].pipedir;
+		config.tgt_cfg[i].nentries = target_ce_config_wlan[i].nentries;
+		config.tgt_cfg[i].nbytes_max = target_ce_config_wlan[i].nbytes_max;
+		config.tgt_cfg[i].flags = target_ce_config_wlan[i].flags;
+	}
+	config.svc_cfg_valid = 1;
+	config.svc_cfg_len = services > QMI_WLFW_MAX_NUM_SVC_V01 ? QMI_WLFW_MAX_NUM_SVC_V01 : services;
+	for (unsigned i = 0; i < config.svc_cfg_len; i++) {
+		config.svc_cfg[i].service_id = target_service_to_ce_map_wlan[i].service_id;
+		config.svc_cfg[i].pipe_dir = target_service_to_ce_map_wlan[i].pipedir;
+		config.svc_cfg[i].pipe_num = target_service_to_ce_map_wlan[i].pipenum;
+	}
+	config.shadow_reg_valid = 1;
+	config.shadow_reg_len = shadows > QMI_WLFW_MAX_NUM_SHADOW_REG_V01 ? QMI_WLFW_MAX_NUM_SHADOW_REG_V01 : shadows;
+	for (unsigned i = 0; i < config.shadow_reg_len; i++) {
+		config.shadow_reg[i].id = target_shadow_reg_cfg_map[i].ce_id;
+		config.shadow_reg[i].offset = target_shadow_reg_cfg_map[i].reg_offset;
+	}
+	say("wcn3990: 9: the configuration: %u pipes, %u services, %u shadow registers (ath10k's snoc.c)\n", config.tgt_cfg_len,
+	    config.svc_cfg_len, config.shadow_reg_len);
+	bzero(&config_reply, sizeof(config_reply));
+	if (!ask("9: the configuration", QMI_WLFW_WLAN_CFG_REQ_V01, WLFW_WLAN_CFG_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_wlan_cfg_req_msg_v01_ei, &config, wlfw_wlan_cfg_resp_msg_v01_ei, &config_reply, 0, false)) {
+		return false;
+	}
+	bzero(&mode, sizeof(mode));
+	bzero(&mode_reply, sizeof(mode_reply));
+	mode.mode = QMI_WLFW_MISSION_V01;
+	if (!ask("10: the mode: mission", QMI_WLFW_WLAN_MODE_REQ_V01, WLFW_WLAN_MODE_REQ_MSG_V01_MAX_MSG_LEN,
+	    wlfw_wlan_mode_req_msg_v01_ei, &mode, wlfw_wlan_mode_resp_msg_v01_ei, &mode_reply, 0, false)) {
+		return false;
+	}
+	say("wcn3990: 10: THE FIRMWARE IS IN MISSION MODE: the radio waits for its driver at the copy engines\n");
+	in_mission = true;
+	return true;
+}
+
 static void
 exchange(void)
 {
@@ -335,8 +397,10 @@ exchange(void)
 	static struct wlfw_cap_resp_msg_v01 target;
 	static struct wlfw_cal_report_req_msg_v01 report;
 	struct wlfw_cal_report_resp_msg_v01 report_reply;
-	uint32_t board_id, seconds = 15;
+	uint32_t board_id, seconds = 15, level = 1;
 	int ret;
+
+	PE_parse_boot_argn("wcn3990", &level, sizeof(level));
 
 	PE_parse_boot_argn("wcn3990_wait", &seconds, sizeof(seconds));
 	ret = qmi_handle_init(&handle, RESPONSE_MAX, &ops, handlers);
@@ -459,10 +523,15 @@ exchange(void)
 	/* 8: "firmware ready" */
 	if (!wait_for(&wlfw.fw_ready, seconds * 1000)) {
 		say("wcn3990: 8: NO \"FIRMWARE READY\" within %u s of the calibration report\n", seconds);
+		goto out;
+	}
+	/* 9 and 10 (wcn3990=2): the configuration and the mode, as ath10k sends them when its driver starts */
+	if (level >= 2) {
+		(void)mission();
 	}
 out:
-	say("wcn3990: the exchange ends %llu ms after it began: \"MSA ready\" %s, \"FIRMWARE READY\" %s\n", now_ms() - wlfw.began,
-	    wlfw.msa_ready ? "yes" : "no", wlfw.fw_ready ? "YES" : "no");
+	say("wcn3990: the exchange ends %llu ms after it began: \"MSA ready\" %s, \"FIRMWARE READY\" %s, mission mode %s\n",
+	    now_ms() - wlfw.began, wlfw.msa_ready ? "yes" : "no", wlfw.fw_ready ? "YES" : "no", in_mission ? "YES" : "no");
 }
 
 static void
