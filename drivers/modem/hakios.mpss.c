@@ -3721,6 +3721,17 @@ rmtfs_buffer_make(void)
 }
 
 /*
+ * The navigation processor among the buffer's owners, or not: SC7280 Android's rmtfs gives it the buffer too; the SM7150's
+ * device tree names no VMID for it, and TrustZone refused the three (an invalid argument, -2) on surya, 3 November 2026.
+ * modem_no_nav=1 leaves it out anywhere; on the SM7150 it is left out unless modem_nav=1.
+ */
+static bool
+no_nav(void)
+{
+	return option("modem_no_nav") || (sm7150 && !option("modem_nav"));
+}
+
+/*
  * TrustZone asked to let the modem into the buffer (Linux's qcom_scm_assign_mem(): the memory, who
  * has it now, who is to have it and how), or, with `in` false, out of it again.
  */
@@ -3763,12 +3774,12 @@ rmtfs_share(bool in)
 		page->destinations[1].permission = VM_PERM_RW;
 		page->destinations[2].vmid = VMID_NAV;
 		page->destinations[2].permission = VM_PERM_RW;
-		destinations = option("modem_no_nav") ? 2 : 3;
+		destinations = no_nav() ? 2 : 3;
 	} else {
 		page->sources[0] = VMID_HLOS;
 		page->sources[1] = VMID_MSS_MSA;
 		page->sources[2] = VMID_NAV;
-		sources = option("modem_no_nav") ? 2 : 3;
+		sources = no_nav() ? 2 : 3;
 		page->destinations[0].vmid = VMID_HLOS;
 		page->destinations[0].permission = VM_PERM_RW;
 		destinations = 1;
@@ -5074,6 +5085,18 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the modem has put into its own");
+	/*
+	 * Our queue (item 479), where the SC7280's modem has made it and the SM7150's has not (seen on surya, 3 November
+	 * 2026, as with its audio DSP: hakios.adsp.c): Linux's glink_smem allocates it itself, 16 KB; made so here.
+	 */
+	if (!glink_find() && glink.descriptor != 0 && glink.theirs != 0 && glink.ours == 0) {
+		uint32_t cacheline = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_MPSS, &cacheline, &size);
+
+		printf("mpss: %u: our queue (item 479) is not there: it is made, 16384 bytes, as Linux makes it\n", step);
+		if (partition == 0 || !our_item_make(partition, 479, 16384)) {
+			return false;
+		}
+	}
 	if (!glink_find()) {
 		printf("mpss: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);

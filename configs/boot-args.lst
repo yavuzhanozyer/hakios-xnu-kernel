@@ -188,6 +188,7 @@ modem_ipa_smmu_off	k
 modem_keep	k
 modem_listen	k
 modem_nas_wait	k
+modem_nav	k
 modem_new	k
 modem_no_ipa_qmi	k
 modem_no_nav	k

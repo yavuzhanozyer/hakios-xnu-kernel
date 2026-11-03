@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 362 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 363 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -785,7 +785,7 @@ CONFIG_WIFI=y
 # CONFIG_WIFI_WIDE is not set
 
 #
-# Cellular (54)
+# Cellular (55)
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
@@ -862,6 +862,9 @@ CONFIG_MODEM_AGAIN=y
 
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_NAS_WAIT is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NAV is not set
 
 # read by hakios.mpss.c (kernel)
 # CONFIG_MODEM_NEW is not set

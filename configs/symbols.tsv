@@ -170,6 +170,7 @@ MODEM_IPA_SMMU_OFF	arg	modem_ipa_smmu_off	Cellular	k	hakios.mpss.c
 MODEM_KEEP	arg	modem_keep	Cellular	k	hakios.mpss.c	
 MODEM_LISTEN	arg	modem_listen	Cellular	k	hakios.mpss.c	
 MODEM_NAS_WAIT	arg	modem_nas_wait	Cellular	k	hakios.mpss.c	
+MODEM_NAV	arg	modem_nav	Cellular	k	hakios.mpss.c	
 MODEM_NEW	arg	modem_new	Cellular	k	hakios.mpss.c	
 MODEM_NO_IPA_QMI	arg	modem_no_ipa_qmi	Cellular	k	hakios.mpss.c	
 MODEM_NO_NAV	arg	modem_no_nav	Cellular	k	hakios.mpss.c	
