@@ -619,13 +619,34 @@ copy_engines(void)
 	PE_parse_boot_argn("wcn3990_htc", &seconds, sizeof(seconds));
 	/* wcn3990_ce=N stops after part N: 1 the WLAN's registers read, 2 our DMA memory zeroed, 3 the SMMU, then the rest */
 	PE_parse_boot_argn("wcn3990_ce", &part, sizeof(part));
-	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
-	delay_for_interval(1500, NSEC_PER_MSEC);
+	{
+		/* wcn3990_wait=MS: time for the WLAN to come up after the mode before anything of it is touched (default 0) */
+		uint32_t wait_ms = 0;
+
+		PE_parse_boot_argn("wcn3990_wait", &wait_ms, sizeof(wait_ms));
+		if (wait_ms != 0) {
+			say("wcn3990: 11: waiting %u ms after the mode, as wcn3990_wait asks\n", wait_ms);
+			delay_for_interval(wait_ms, NSEC_PER_MSEC);
+		}
+	}
 	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
 	if (wlan == NULL) {
 		say("wcn3990: 11: the WLAN's registers cannot be mapped\n");
 		return;
 	}
+	{
+		/* wcn3990_peek=OFS: one word of the WLAN's 8 MB read first, to tell the region from the copy engines in it */
+		uint32_t peek = ~0u;
+
+		if (PE_parse_boot_argn("wcn3990_peek", &peek, sizeof(peek)) && peek < WLAN_MEMBASE_SIZE) {
+			peek &= ~3u;
+			say("wcn3990: 11: about to read one word of the WLAN's region at %#llx (+%#x)\n", WLAN_MEMBASE + peek, peek);
+			delay_for_interval(1500, NSEC_PER_MSEC);
+			say("wcn3990: 11: it reads %#x\n", wl_rd(peek));
+		}
+	}
+	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
+	delay_for_interval(1500, NSEC_PER_MSEC);
 	say("wcn3990: 11: the WLAN's registers answer: CE1 ctrl1 %#x, dst size %#x\n", wl_rd(CE_BASE(1) + CE_CTRL1),
 	    wl_rd(CE_BASE(1) + CE_DR_SIZE));
 	if (part <= 1) {
