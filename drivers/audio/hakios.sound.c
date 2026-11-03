@@ -1632,6 +1632,13 @@ hakios_sound_dsp_up(void)
 	}
 	PE_parse_boot_argn("adsp_sm7150", &sm7150, sizeof(sm7150));
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
+	/*
+	 * surya: 30 dB under the TAS2562's 0 dB was far quieter than Android (3 November 2026). Its default is 6 dB under
+	 * that 0 dB (the guard's limiter and Darwin's own headroom still apply); sound_below=N sets it as anywhere else.
+	 */
+	if (sm7150) {
+		below = 48;
+	}
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
 	PE_parse_boot_argn("sound_pause", &pause_ms, sizeof(pause_ms));
 	PE_parse_boot_argn("sound_guard_as", &guard_as, sizeof(guard_as));
