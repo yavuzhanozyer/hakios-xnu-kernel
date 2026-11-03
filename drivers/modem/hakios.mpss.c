@@ -911,6 +911,97 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	return -1;
 }
 
+/* A resource's address in RPMh's command database by its name ("ldoc1", ...); 0: none. */
+static uint32_t
+rpmh_address(const char *name)
+{
+	char id[8] = { 0 };
+
+	if (cmd_db == NULL) {
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
+	}
+	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
+		return 0;
+	}
+	strlcpy(id, name, sizeof(id));
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &cmd_db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			if (memcmp(entry[i].id, id, sizeof(id)) == 0) {
+				return entry[i].address;
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+ * A PMIC regulator through RPMh, as Linux's qcom-rpmh-regulator.c asks for one (a VRM resource: +0 its voltage in mV, +4
+ * on or off, +8 its mode): the voltage (0: left as it is), the mode (0: left), then on. For the drivers beside the
+ * modem's: surya's WCN3990 has its five rails up so. 0, or < 0.
+ */
+int hakios_mpss_regulator(const char *name, uint32_t millivolts, uint32_t mode, bool on);
+int
+hakios_mpss_regulator(const char *name, uint32_t millivolts, uint32_t mode, bool on)
+{
+	uint32_t address = rpmh_address(name), offsets[3], values[3], count = 0, done = 0;
+	uint64_t began;
+
+	if (address == 0) {
+		printf("mpss: RPMh has no \"%s\"\n", name);
+		return -ENOENT;
+	}
+	if (millivolts != 0) {
+		offsets[count] = 0;
+		values[count++] = millivolts;
+	}
+	if (mode != 0) {
+		offsets[count] = 8;
+		values[count++] = mode;
+	}
+	offsets[count] = 4;
+	values[count++] = on ? 1 : 0;
+	need(&rsc);
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
+		lck_mtx_unlock(&hakios_rsc_lock);
+		printf("mpss: TCS %u of the sequencer is busy: %s is not asked\n", RPMH_TCS, name);
+		return -EBUSY;
+	}
+	printf("mpss: about to ask RPMh for %s (%#x): %u mV, mode %u, %s\n", name, address, millivolts, mode, on ? "on" : "off");
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	for (unsigned c = 0; c < count; c++) {
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c), MSGID_WRITE_WAITED);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c) + 4, address + offsets[c]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c) + 8, values[c]);
+	}
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, (1u << count) - 1);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, (1u << count) - 1);
+	settle();
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	began = now_us();
+	while (now_us() - began < 100000) {
+		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
+		if (done) {
+			break;
+		}
+		sleep_us(50);
+	}
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	lck_mtx_unlock(&hakios_rsc_lock);
+	printf("mpss: RPMh %s for %s after %llu us\n", done ? "has done it" : "HAS NOT SAID DONE", name, now_us() - began);
+	return done ? 0 : -ETIMEDOUT;
+}
+
 /* The two rails at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. */
 static bool
 rails(uint32_t level)

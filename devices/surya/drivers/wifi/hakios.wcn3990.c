@@ -61,6 +61,7 @@ void hakios_wcn3990_modem_down(void);
 const struct hakios_qrtr_ops *hakios_mpss_qrtr(void);
 int hakios_mpss_assign(uint64_t address, uint64_t size, const uint32_t *sources, unsigned source_count,
     const uint32_t *destinations, unsigned destination_count);
+int hakios_mpss_regulator(const char *name, uint32_t millivolts, uint32_t mode, bool on);
 
 static int say(const char *format, ...) __printflike(1, 2);
 
@@ -575,6 +576,34 @@ show_htc(unsigned ce, const volatile uint8_t *data, unsigned length)
 	}
 }
 
+/*
+ * ath10k_hw_power_on(): the chip's rails, in the order of ath10k's snoc.c (vdd-0.8-cx-mx, vdd-1.8-xo, vdd-1.3-rfa,
+ * vdd-3.3-ch0; and ch1, which surya's tree names too), at the voltages its device tree configures, in high power mode (7,
+ * a PMIC5 LDO's): surya's qcom,icnss@18800000 supplies are PM6150 L9 and PM6150L L1, L2, L10 and L11. wcn3990_rails=0
+ * leaves them as the boot loader left them.
+ */
+static void
+rails_on(void)
+{
+	static const struct { const char *rail, *resource; uint32_t millivolts; } rails[] = {
+		{ "vdd-cx-mx", "ldoa9", 640 }, { "vdd-1.8-xo", "ldoc1", 1800 }, { "vdd-1.3-rfa", "ldoc2", 1300 },
+		{ "vdd-3.3-ch0", "ldoc10", 3300 }, { "vdd-3.3-ch1", "ldoc11", 3300 },
+	};
+	uint32_t on = 1;
+
+	PE_parse_boot_argn("wcn3990_rails", &on, sizeof(on));
+	if (!on) {
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]); i++) {
+		int ret = hakios_mpss_regulator(rails[i].resource, rails[i].millivolts, 7, true);
+
+		say("wcn3990: 11: the chip's rail %s (%s, %u mV): %s (%d)\n", rails[i].rail, rails[i].resource, rails[i].millivolts,
+		    ret == 0 ? "on" : "NOT ASKED", ret);
+		delay_for_interval(2, NSEC_PER_MSEC);
+	}
+}
+
 static void
 copy_engines(void)
 {
@@ -589,6 +618,7 @@ copy_engines(void)
 	PE_parse_boot_argn("wcn3990_htc", &seconds, sizeof(seconds));
 	/* wcn3990_ce=N stops after part N: 1 the WLAN's registers read, 2 our DMA memory zeroed, 3 the SMMU, then the rest */
 	PE_parse_boot_argn("wcn3990_ce", &part, sizeof(part));
+	rails_on();
 	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
 	delay_for_interval(1500, NSEC_PER_MSEC);
 	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
