@@ -480,7 +480,7 @@ smmu_bypass(void)
 		uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
 
 		if ((smr & (1u << 31)) && ((id ^ WLAN_STREAM) & ~mask) == 0) {
-			say("wcn3990: 11: the SMMU's match register %u (%#x) takes the WLAN's stream already: s2cr %#x\n", n, smr, s2cr);
+			say("wcn3990: 0: the SMMU's match register %u (%#x) takes the WLAN's stream already: s2cr %#x\n", n, smr, s2cr);
 			done = true;
 			break;
 		}
@@ -496,22 +496,22 @@ smmu_bypass(void)
 		 */
 		uint32_t back;
 
-		say("wcn3990: 11: about to let the WLAN's stream %#x/%#x through the SMMU untranslated: match register %u, s2cr bypass\n",
+		say("wcn3990: 0: about to let the WLAN's stream %#x/%#x through the SMMU untranslated: match register %u, s2cr bypass\n",
 		    WLAN_STREAM, WLAN_STREAM_MASK, free_one);
 		delay_for_interval(1500, NSEC_PER_MSEC);
 		*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = SMMU_S2CR_BYPASS;
 		__asm__ volatile ("dsb sy" ::: "memory");
 		back = *(volatile uint32_t *)(smmu + SMMU_S2CR(free_one));
-		say("wcn3990: 11: s2cr %u reads %#x after the write%s\n", free_one, back, (back & (3u << 16)) == SMMU_S2CR_BYPASS ?
+		say("wcn3990: 0: s2cr %u reads %#x after the write%s\n", free_one, back, (back & (3u << 16)) == SMMU_S2CR_BYPASS ?
 		    "" : ": bypass not allowed, a context bank with translation off instead");
 		if ((back & (3u << 16)) != SMMU_S2CR_BYPASS) {
 			vm_offset_t banks = ml_io_map(SMMU_PHYS, 0x80000 + 0x1000 * 128);
 			uint32_t cb = (*(volatile uint32_t *)(smmu + SMMU_IDR1) & 0xff) - 1;
 
-			say("wcn3990: 11: context bank %u: cbar %#x, sctlr %#x\n", cb, *(volatile uint32_t *)(banks + SMMU_CBAR(cb)),
+			say("wcn3990: 0: context bank %u: cbar %#x, sctlr %#x\n", cb, *(volatile uint32_t *)(banks + SMMU_CBAR(cb)),
 			    *(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)));
 			if (*(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)) & 1) {
-				say("wcn3990: 11: it translates (in use): the stream is left as it was\n");
+				say("wcn3990: 0: it translates (in use): the stream is left as it was\n");
 				*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = SMMU_S2CR_FAULT_DEFAULT;
 				lck_mtx_unlock(&hakios_smmu_lock);
 				return false;
@@ -520,15 +520,15 @@ smmu_bypass(void)
 			*(volatile uint32_t *)(banks + SMMU_CB_SCTLR(cb)) = 0;
 			*(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)) = cb;        /* type 0 (translate) to that bank */
 			__asm__ volatile ("dsb sy" ::: "memory");
-			say("wcn3990: 11: s2cr %u now %#x (context bank %u, translation off)\n", free_one,
+			say("wcn3990: 0: s2cr %u now %#x (context bank %u, translation off)\n", free_one,
 			    *(volatile uint32_t *)(smmu + SMMU_S2CR(free_one)), cb);
 		}
 		*(volatile uint32_t *)(smmu + SMMU_SMR(free_one)) = 1u << 31 | WLAN_STREAM_MASK << 16 | WLAN_STREAM;
 		__asm__ volatile ("dsb sy" ::: "memory");
-		say("wcn3990: 11: smr %u now %#x\n", free_one, *(volatile uint32_t *)(smmu + SMMU_SMR(free_one)));
+		say("wcn3990: 0: smr %u now %#x\n", free_one, *(volatile uint32_t *)(smmu + SMMU_SMR(free_one)));
 		done = true;
 	} else if (!done) {
-		say("wcn3990: 11: no free match register in the SMMU (%u of them)\n", count);
+		say("wcn3990: 0: no free match register in the SMMU (%u of them)\n", count);
 	}
 	lck_mtx_unlock(&hakios_smmu_lock);
 	return done;
@@ -666,7 +666,7 @@ copy_engines(void)
 	if (part <= 2) {
 		return;
 	}
-	if (!smmu_bypass() || part <= 3) {
+	if (part <= 3) {
 		return;
 	}
 	say("wcn3990: 11: the copy engines before: CE0 ctrl1 %#x, CE1 ctrl1 %#x, CE1 dst size %#x, CE1 drri %#x, wrapper rri %#x %#x\n",
@@ -757,6 +757,14 @@ exchange(void)
 	 * the indications); with them up only after the mode, the copy engines' registers did not answer (3 November 2026)
 	 */
 	rails_on();
+	/*
+	 * ... and the WLAN's DMA stream through the SMMU before the mode can let it move: with the mode "mission" and no match
+	 * for stream 0x240 the phone stalled within 3 s, with nothing of the WLAN touched (3 November 2026). Android attaches
+	 * it when the driver probes, long before the firmware is spoken to. wcn3990=2 and above.
+	 */
+	if (level >= 2 && !smmu_bypass()) {
+		goto out;
+	}
 
 	/* 1: ath10k_qmi_ind_register_send_sync_msg() */
 	bzero(&indications, sizeof(indications));
