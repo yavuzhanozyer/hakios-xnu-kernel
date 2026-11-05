@@ -574,13 +574,16 @@ ce_destination(unsigned ce, uint64_t ring, uint32_t entries)
  * registers were configured with the mode), as ath10k_ce_send_nolock_64() does on the WCN3990.
  */
 #define CE_SHADOW_SR_WR_INDEX_CE0 0x00032000u
-#define CE_TX_BUFFERS             0x50000u
+#define CE_SHADOW_SR_WR_INDEX_CE3 0x0003200cu
+#define CE_TX_BUFFERS             0x50000u      /* CE0's: 32 of 2 KB */
+#define CE3_RING                  0x4000u       /* CE3's source ring, 32 entries */
+#define CE3_TX_BUFFERS            0x60000u      /* CE3's: 32 of 2 KB */
 
 static struct {
 	unsigned ce;
 	uint32_t entries, ring_at, buffers_at, read, write;
 } rx[2];
-static uint32_t tx_write;
+static uint32_t tx_write, tx3_write;
 static volatile uint8_t *shadow;
 static uint8_t rx_data[CE_BUFFER];
 static unsigned rx_length, rx_ce;
@@ -618,15 +621,20 @@ ce_receive(uint32_t ms)
 	return false;
 }
 
-/* One HTC message to an endpoint through CE0: the 8 bytes of its header, then the payload. */
+/*
+ * One HTC message to an endpoint: the 8 bytes of its header, then the payload. HTC's control (endpoint 0, the service
+ * RSVD_CTRL) goes out through CE0, WMI's control through CE3, as snoc.c's map of services to pipes has them
+ * (target_service_to_ce_map_wlan: WMI_CONTROL, out, pipe 3).
+ */
 static bool
 htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 {
 	static uint8_t sequence;
-	volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + 0x1000);
-	uint32_t slot = tx_write;
-	volatile uint8_t *buffer = dma + CE_TX_BUFFERS + slot * CE_BUFFER;
-	uint64_t pa = CE_DMA_PHYS + CE_TX_BUFFERS + (uint64_t)slot * CE_BUFFER;
+	bool wmi = endpoint != 0;
+	volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + (wmi ? CE3_RING : 0x1000));
+	uint32_t slot = wmi ? tx3_write : tx_write;
+	volatile uint8_t *buffer = dma + (wmi ? CE3_TX_BUFFERS : CE_TX_BUFFERS) + slot * CE_BUFFER;
+	uint64_t pa = CE_DMA_PHYS + (wmi ? CE3_TX_BUFFERS : CE_TX_BUFFERS) + (uint64_t)slot * CE_BUFFER;
 
 	if (shadow == NULL) {
 		shadow = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE + CE_SHADOW_SR_WR_INDEX_CE0, 0x1000);
@@ -650,8 +658,13 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 	ring[slot].flags = (uint16_t)(endpoint << 4);
 	ring[slot].hash = 0;
 	__asm__ volatile ("dsb sy" ::: "memory");
-	tx_write = (slot + 1) % 32;
-	*(volatile uint32_t *)shadow = tx_write;
+	if (wmi) {
+		tx3_write = (slot + 1) % 32;
+		*(volatile uint32_t *)(shadow + (CE_SHADOW_SR_WR_INDEX_CE3 - CE_SHADOW_SR_WR_INDEX_CE0)) = tx3_write;
+	} else {
+		tx_write = (slot + 1) % 32;
+		*(volatile uint32_t *)shadow = tx_write;
+	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 	return true;
 }
@@ -1249,8 +1262,9 @@ copy_engines(uint32_t level)
 	for (unsigned ce = 0; ce < 12; ce++) {
 		wl_wr(CE_BASE(ce) + CE_CTRL1, wl_rd(CE_BASE(ce) + CE_CTRL1) | CE_CTRL1_RRI_UPDATE);
 	}
-	/* CE0: the source ring for HTC's control, 32 entries of at most 2048 bytes; nothing is sent on it here */
+	/* CE0: the source ring for HTC's control, CE3 the one for WMI's, 32 entries of at most 2048 bytes each */
 	ce_source(0, CE_DMA_PHYS + 0x1000, 32, CE_BUFFER);
+	ce_source(3, CE_DMA_PHYS + CE3_RING, 32, CE_BUFFER);
 	/* CE1, CE2: destination rings, every entry but one given a buffer (ath10k_snoc_rx_post()) */
 	for (unsigned r = 0; r < 2; r++) {
 		volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + in[r].ring_at);
@@ -1275,6 +1289,7 @@ copy_engines(uint32_t level)
 		rx[r].write = in[r].entries - 1;
 	}
 	tx_write = wl_rd(CE_BASE(0) + CE_SR_WR_INDEX) & 31;
+	tx3_write = wl_rd(CE_BASE(3) + CE_SR_WR_INDEX) & 31;
 	began = now_ms();
 	if (!ce_receive(seconds * 1000)) {
 		say("wcn3990: 11: NOTHING CAME THROUGH THE COPY ENGINES in %u s; CE1 drri %#x, misc status %#x; CE2 drri %#x, misc "
