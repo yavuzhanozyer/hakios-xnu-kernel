@@ -660,8 +660,31 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 	ring[slot].hash = 0;
 	__asm__ volatile ("dsb sy" ::: "memory");
 	if (wmi) {
+		uint64_t asked;
+
 		tx3_write = (slot + 1) % 32;
 		*(volatile uint32_t *)(shadow + (CE_SHADOW_SR_WR_INDEX_CE3 - CE_SHADOW_SR_WR_INDEX_CE0)) = tx3_write;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		/*
+		 * (the source read index of CE3, as the engine keeps it in our memory, rri: its low 16 bits; and its register) --
+		 * if it does not move within 20 ms, the write index goes to CE3's own register as well, and that is said
+		 */
+		asked = now_ms();
+		while ((*(volatile uint32_t *)(dma + 4 * 3) & 0xffff) != tx3_write && now_ms() - asked < 20) {
+			delay_for_interval(1, NSEC_PER_MSEC);
+		}
+		if ((*(volatile uint32_t *)(dma + 4 * 3) & 0xffff) != tx3_write) {
+			say("wcn3990: 13:   CE3 did not take it through its shadow register (rri %#x, srri %#x, its write index register %#x): "
+			    "written to that register too\n", *(volatile uint32_t *)(dma + 4 * 3), wl_rd(CE_BASE(3) + CE_CURRENT_SRRI),
+			    wl_rd(CE_BASE(3) + CE_SR_WR_INDEX));
+			wl_wr(CE_BASE(3) + CE_SR_WR_INDEX, tx3_write);
+			asked = now_ms();
+			while ((*(volatile uint32_t *)(dma + 4 * 3) & 0xffff) != tx3_write && now_ms() - asked < 20) {
+				delay_for_interval(1, NSEC_PER_MSEC);
+			}
+			say("wcn3990: 13:   CE3 then: rri %#x, srri %#x, misc status %#x\n", *(volatile uint32_t *)(dma + 4 * 3),
+			    wl_rd(CE_BASE(3) + CE_CURRENT_SRRI), wl_rd(CE_BASE(3) + CE_MISC_STATUS));
+		}
 	} else {
 		tx_write = (slot + 1) % 32;
 		*(volatile uint32_t *)shadow = tx_write;
@@ -1321,6 +1344,11 @@ copy_engines(uint32_t level)
 	}
 	tx_write = wl_rd(CE_BASE(0) + CE_SR_WR_INDEX) & 31;
 	tx3_write = wl_rd(CE_BASE(3) + CE_SR_WR_INDEX) & 31;
+	say("wcn3990: 11: CE3 set up: base %#x %#x, size %u, ctrl1 %#x, watermarks %#x, write index %u, read index %u; CE0 the same: "
+	    "base %#x, size %u, ctrl1 %#x, write index %u\n", wl_rd(CE_BASE(3) + CE_SR_BASE_LO), wl_rd(CE_BASE(3) + CE_SR_BASE_HI),
+	    wl_rd(CE_BASE(3) + CE_SR_SIZE), wl_rd(CE_BASE(3) + CE_CTRL1), wl_rd(CE_BASE(3) + CE_SRC_WM), tx3_write,
+	    wl_rd(CE_BASE(3) + CE_CURRENT_SRRI), wl_rd(CE_BASE(0) + CE_SR_BASE_LO), wl_rd(CE_BASE(0) + CE_SR_SIZE),
+	    wl_rd(CE_BASE(0) + CE_CTRL1), tx_write);
 	began = now_ms();
 	if (!ce_receive(seconds * 1000)) {
 		say("wcn3990: 11: NOTHING CAME THROUGH THE COPY ENGINES in %u s; CE1 drri %#x, misc status %#x; CE2 drri %#x, misc "
