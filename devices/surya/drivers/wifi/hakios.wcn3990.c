@@ -19,6 +19,8 @@
  *   8  "firmware ready" waited for (wcn3990_wait seconds, default 15)
  *   9  (wcn3990=2) the configuration: snoc.c's copy engine pipes, the map of HTC services to them, the shadow registers
  *  10  (wcn3990=2) the mode "mission": the radio on, waiting for its driver at the copy engines
+ *  13  (wcn3990=5) WMI's init (the firmware's memory requests met from the compute DSP's region at 0x93c00000), its
+ *      ready (the radio's MAC address), a station's vdev, the channels, and a scan; every network heard, listed
  *  12  (wcn3990=4) HTC: the WMI control service connected, setup complete, and the firmware's first WMI events
  *  11  (wcn3990=3) the copy engines: the WLAN's stream through the SMMU, three engines' rings, buffers to receive into,
  *      and the firmware's first HTC message ("ready") watched for (see copy_engines())
@@ -580,7 +582,7 @@ static struct {
 } rx[2];
 static uint32_t tx_write;
 static volatile uint8_t *shadow;
-static uint8_t rx_data[512];
+static uint8_t rx_data[CE_BUFFER];
 static unsigned rx_length, rx_ce;
 
 static bool
@@ -656,9 +658,398 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 
 static void show_htc(unsigned ce, const volatile uint8_t *data, unsigned length);
 
-/* ath10k_htc_connect_service() for WMI's control, ath10k_htc_start(), and what the firmware says on WMI's endpoint */
+/*
+ * HTC's credits for WMI's endpoint: what the firmware gives back comes in the trailer of what it sends (flag 0x2: the
+ * trailer's length in byte 4 of the header; its records, id 1 "credits", are pairs of endpoint and count), as
+ * ath10k_htc_process_trailer() reads them. A WMI command takes as many credits as its credit size (2184) goes into it.
+ */
+static unsigned wmi_credits = 2, wmi_credit_size = 2184;
+
 static void
-htc_wmi(void)
+htc_credits(const uint8_t *m, unsigned length)
+{
+	unsigned payload, trailer, at;
+
+	if (length < 8 || !(m[1] & 0x2)) {
+		return;
+	}
+	payload = m[2] | m[3] << 8;
+	trailer = m[4];
+	if (trailer > payload || 8 + payload > length) {
+		return;
+	}
+	for (at = 8 + payload - trailer; at + 2 <= 8 + payload;) {
+		unsigned id = m[at], record = m[at + 1];
+
+		if (at + 2 + record > 8 + payload) {
+			break;
+		}
+		if (id == 1) {
+			for (unsigned i = 0; i + 1 < record; i += 2) {
+				if (m[at + 2 + i] == 1) {
+					wmi_credits += m[at + 3 + i];
+				}
+			}
+		}
+		at += 2 + record;
+	}
+}
+
+/* ---- step 13 (wcn3990=5): WMI's init, the firmware's ready, and a scan (ath10k's wmi-tlv.c) ------------------------------- */
+
+#define WMI_INIT_CMD            0x0001
+#define WMI_START_SCAN_CMD      0x3001
+#define WMI_SCAN_CHAN_LIST_CMD  0x3003
+#define WMI_VDEV_CREATE_CMD     0x5001
+#define WMI_READY_EVENT         0x0002
+#define WMI_SCAN_EVENT          0x3001
+#define WMI_MGMT_RX_EVENT       0x7001
+#define TAG_ARRAY_UINT32        16
+#define TAG_ARRAY_BYTE          17
+#define TAG_ARRAY_STRUCT        18
+#define TAG_ARRAY_FIXED_STRUCT  19
+#define TAG_SERVICE_READY       32
+#define TAG_HOST_MEM_REQ        34
+#define TAG_READY_EVENT         35
+#define TAG_SCAN_EVENT          36
+#define TAG_MGMT_RX_HDR         44
+#define TAG_INIT_CMD            74
+#define TAG_RESOURCE_CONFIG     75
+#define TAG_HOST_MEMORY_CHUNK   76
+#define TAG_START_SCAN_CMD      77
+#define TAG_SCAN_CHAN_LIST_CMD  79
+#define TAG_CHANNEL             80
+#define TAG_VDEV_CREATE_CMD     86
+#define WMI_ABI_VER0            0x01000000u
+#define WMI_ABI_VER1            53
+#define WMI_ABI_NS0             0x5f414351u
+#define WMI_ABI_NS1             0x00004c4du
+#define HOST_MEMORY_PHYS        0x93c00000ull   /* what the firmware asks for at its service ready: after our CE memory */
+#define HOST_MEMORY_SIZE        0x01a00000u
+
+static uint8_t wmi_out[CE_BUFFER];
+static unsigned wmi_at;
+
+static void
+w32(uint32_t value)
+{
+	wmi_out[wmi_at++] = (uint8_t)value;
+	wmi_out[wmi_at++] = (uint8_t)(value >> 8);
+	wmi_out[wmi_at++] = (uint8_t)(value >> 16);
+	wmi_out[wmi_at++] = (uint8_t)(value >> 24);
+}
+
+/* a TLV's header: its length (the value's bytes) and its tag */
+static void
+wtlv(uint32_t tag, uint32_t length)
+{
+	w32((length & 0xffff) | tag << 16);
+}
+
+static uint32_t
+r32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* One WMI command: the header (its id), then what has been put into wmi_out after it; credits waited for. */
+static bool
+wmi_send(unsigned wmi, uint32_t id, const char *what)
+{
+	unsigned need = (wmi_at + wmi_credit_size - 1) / wmi_credit_size;
+
+	wmi_out[0] = (uint8_t)id;
+	wmi_out[1] = (uint8_t)(id >> 8);
+	wmi_out[2] = (uint8_t)(id >> 16);
+	wmi_out[3] = 0;
+	for (unsigned waited = 0; wmi_credits < need && waited < 50; waited++) {
+		if (ce_receive(100)) {
+			htc_credits(rx_data, rx_length);
+		}
+	}
+	if (wmi_credits < need) {
+		say("wcn3990: 13: no credits for %s (%u wanted, %u had)\n", what, need, wmi_credits);
+		return false;
+	}
+	wmi_credits -= need;
+	say("wcn3990: 13: WMI: %s (command %#x, %u bytes)\n", what, id, wmi_at);
+	return htc_send((uint8_t)wmi, wmi_out, wmi_at);
+}
+
+/* A TLV of a message by its tag (at the top level, after the WMI header); NULL if none */
+static const uint8_t *
+wmi_find(const uint8_t *m, unsigned length, uint32_t tag, unsigned *value_length)
+{
+	for (unsigned at = 0; at + 4 <= length;) {
+		uint32_t header = r32(m + at), size = header & 0xffff;
+
+		if (at + 4 + size > length) {
+			return NULL;
+		}
+		if ((header >> 16) == tag) {
+			*value_length = size;
+			return m + at + 4;
+		}
+		at += 4 + size;
+	}
+	return NULL;
+}
+
+/* the next WMI event (its id; its TLVs in *body), credits taken from everything that comes; 0: none within ms */
+static uint32_t
+wmi_event(unsigned wmi, uint32_t ms, const uint8_t **body, unsigned *length)
+{
+	uint64_t began = now_ms();
+
+	while (now_ms() - began < ms) {
+		if (!ce_receive(ms - (uint32_t)(now_ms() - began))) {
+			return 0;
+		}
+		htc_credits(rx_data, rx_length);
+		if (rx_data[0] == wmi && rx_length >= 12) {
+			unsigned payload = rx_data[2] | rx_data[3] << 8;
+			unsigned trailer = (rx_data[1] & 0x2) ? rx_data[4] : 0;
+
+			*body = rx_data + 12;
+			*length = payload > 4 + trailer ? payload - 4 - trailer : 0;
+			return r32(rx_data + 8) & 0xffffff;
+		}
+	}
+	return 0;
+}
+
+static const struct { uint16_t mhz; uint8_t passive; } channels[] = {
+	{ 2412, 0 }, { 2417, 0 }, { 2422, 0 }, { 2427, 0 }, { 2432, 0 }, { 2437, 0 }, { 2442, 0 }, { 2447, 0 }, { 2452, 0 },
+	{ 2457, 0 }, { 2462, 0 }, { 2467, 1 }, { 2472, 1 },
+	{ 5180, 0 }, { 5200, 0 }, { 5220, 0 }, { 5240, 0 }, { 5260, 1 }, { 5280, 1 }, { 5300, 1 }, { 5320, 1 },
+	{ 5500, 1 }, { 5520, 1 }, { 5540, 1 }, { 5560, 1 }, { 5580, 1 }, { 5600, 1 }, { 5620, 1 }, { 5640, 1 }, { 5660, 1 },
+	{ 5680, 1 }, { 5700, 1 }, { 5745, 0 }, { 5765, 0 }, { 5785, 0 }, { 5805, 0 }, { 5825, 0 },
+};
+#define CHANNELS (sizeof(channels) / sizeof(channels[0]))
+
+static struct {
+	uint8_t bssid[6];
+	char ssid[33];
+	uint16_t mhz;
+	int snr;
+} seen_bss[48];
+static unsigned seen_count;
+
+/* A beacon or probe response from the firmware's management rx event: the network it tells of, noted once. */
+static void
+note_frame(const uint8_t *body, unsigned length)
+{
+	unsigned header_length = 0, frame_length = 0;
+	const uint8_t *header = wmi_find(body, length, TAG_MGMT_RX_HDR, &header_length);
+	const uint8_t *frame = wmi_find(body, length, TAG_ARRAY_BYTE, &frame_length);
+	unsigned subtype, at;
+	char ssid[33] = "";
+	unsigned i;
+
+	if (header == NULL || frame == NULL || header_length < 24 || frame_length < 36) {
+		return;
+	}
+	subtype = (frame[0] >> 4) & 0xf;
+	if ((frame[0] & 0x0c) != 0 || (subtype != 8 && subtype != 5)) {
+		return;         /* (management, beacon 8 or probe response 5) */
+	}
+	for (at = 36; at + 2 <= frame_length; at += 2 + frame[at + 1]) {
+		if (frame[at] == 0 && frame[at + 1] <= 32 && at + 2 + frame[at + 1] <= frame_length) {
+			memcpy(ssid, frame + at + 2, frame[at + 1]);
+			ssid[frame[at + 1]] = 0;
+			break;
+		}
+	}
+	for (i = 0; i < seen_count; i++) {
+		if (memcmp(seen_bss[i].bssid, frame + 16, 6) == 0) {
+			return;
+		}
+	}
+	if (seen_count >= sizeof(seen_bss) / sizeof(seen_bss[0])) {
+		return;
+	}
+	memcpy(seen_bss[seen_count].bssid, frame + 16, 6);
+	strlcpy(seen_bss[seen_count].ssid, ssid, sizeof(seen_bss[0].ssid));
+	seen_bss[seen_count].mhz = (uint16_t)r32(header);
+	seen_bss[seen_count].snr = (int)r32(header + 4);
+	say("wcn3990: 14: A NETWORK: \"%s\" %02x:%02x:%02x:%02x:%02x:%02x, %u MHz, snr %d (%s)\n", ssid[0] ? ssid : "(hidden)",
+	    frame[16], frame[17], frame[18], frame[19], frame[20], frame[21], seen_bss[seen_count].mhz, seen_bss[seen_count].snr,
+	    subtype == 8 ? "beacon" : "probe response");
+	seen_count++;
+}
+
+static void
+wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
+{
+	const uint8_t *event, *requests;
+	unsigned event_length = 0, requests_length = 0, body_length = 0, chunks = 0;
+	uint8_t mac[6] = { 0 };
+	uint64_t next = HOST_MEMORY_PHYS, began;
+	const uint8_t *body;
+	uint32_t id, seconds = 15;
+	struct { uint32_t id, size; uint64_t pa; } chunk[16];
+
+	PE_parse_boot_argn("wcn3990_scan", &seconds, sizeof(seconds));
+	/* the service ready: its fixed part (wmi_tlv_svc_rdy_ev: num_mem_reqs at +72), and its memory requests (an array of TLVs) */
+	event = wmi_find(ready, length, TAG_SERVICE_READY, &event_length);
+	requests = wmi_find(ready, length, TAG_ARRAY_STRUCT, &requests_length);
+	if (event == NULL || event_length < 80) {
+		say("wcn3990: 13: the service ready has no fixed part this reads\n");
+		return;
+	}
+	say("wcn3990: 13: service ready: firmware %#x, abi %#x %u, rf chains %u, %u memory requests, %u scan channels at most\n",
+	    r32(event), r32(event + 4), r32(event + 8), r32(event + 36), r32(event + 72), r32(event + 76));
+	for (unsigned at = 0; requests != NULL && at + 4 + 16 <= requests_length && chunks < 16;) {
+		uint32_t header = r32(requests + at), size = header & 0xffff;
+		const uint8_t *r = requests + at + 4;
+		uint32_t units = r32(r + 12), info = r32(r + 8), bytes;
+
+		if ((header >> 16) == TAG_HOST_MEM_REQ && size >= 16) {
+			if (info & 0x1) {
+				units = 4 + 1;          /* NUM_UNITS_IS_NUM_VDEVS: TARGET_TLV_NUM_VDEVS + 1 */
+			} else if (info & 0x6) {
+				units = 33 + 1;         /* ... _NUM_PEERS: TARGET_TLV_NUM_PEERS + 1 */
+			}
+			bytes = (r32(r + 4) * units + 4095) & ~4095u;
+			say("wcn3990: 13:   memory request %u: %u units of %u bytes (info %#x): %u bytes at %#llx\n", r32(r), units,
+			    r32(r + 4), info, bytes, next);
+			if (next + bytes > HOST_MEMORY_PHYS + HOST_MEMORY_SIZE) {
+				say("wcn3990: 13:   more than the %u MB there is for it\n", HOST_MEMORY_SIZE >> 20);
+				return;
+			}
+			{
+				volatile uint8_t *zero = (volatile uint8_t *)ml_io_map_unmappable(next, bytes, VM_WIMG_WCOMB);
+
+				for (uint32_t i = 0; zero != NULL && i < bytes; i += 8) {
+					*(volatile uint64_t *)(zero + i) = 0;
+				}
+			}
+			chunk[chunks].id = r32(r);
+			chunk[chunks].size = bytes;
+			chunk[chunks].pa = next;
+			chunks++;
+			next += bytes;
+		}
+		at += 4 + size;
+	}
+
+	/* WMI_INIT: the version, the resource configuration (ath10k_wmi_tlv_op_gen_init()'s values), the memory chunks */
+	wmi_at = 4;
+	wtlv(TAG_INIT_CMD, 28);
+	w32(WMI_ABI_VER0); w32(WMI_ABI_VER1); w32(WMI_ABI_NS0); w32(WMI_ABI_NS1); w32(0); w32(0);
+	w32(chunks);
+	wtlv(TAG_RESOURCE_CONFIG, 44 * 4);
+	{
+		static const uint32_t config[44] = {
+			4, 33, 0, 0, 2, 66, 32, 0x7, 0x7,               /* vdevs, peers, offload peers, bufs, keys, tids, skid, chains */
+			0x64, 0x64, 0x64, 0x28,                          /* rx timeouts */
+			1, 4, 4, 4, 8, 0, 0, 0, 0x400, 32, 0, 0, 0, 0, 2,  /* decap (native wifi), scans, bmiss, roam, profiles, mcast, dbg, wds */
+			1024 + 32, 2, 1, 0x20, 2, 5, 22, 6, 0, 1, 1, 0, 0, 0, 0, 1u << 9,
+		};
+		for (unsigned i = 0; i < 44; i++) {
+			w32(config[i]);
+		}
+	}
+	wtlv(TAG_ARRAY_STRUCT, chunks * 20);
+	for (unsigned i = 0; i < chunks; i++) {
+		wtlv(TAG_HOST_MEMORY_CHUNK, 16);
+		w32(chunk[i].id); w32((uint32_t)chunk[i].pa); w32(chunk[i].size); w32((uint32_t)(chunk[i].pa >> 32));
+	}
+	if (!wmi_send(wmi, WMI_INIT_CMD, "init")) {
+		return;
+	}
+	began = now_ms();
+	while ((id = wmi_event(wmi, 5000, &body, &body_length)) != 0 && id != WMI_READY_EVENT) {
+		say("wcn3990: 13:   (event %#x while waiting for ready)\n", id);
+	}
+	if (id != WMI_READY_EVENT) {
+		say("wcn3990: 13: NO WMI READY within 5 s of the init\n");
+		return;
+	}
+	event = wmi_find(body, body_length, TAG_READY_EVENT, &event_length);
+	if (event != NULL && event_length >= 36) {
+		memcpy(mac, event + 24, 6);
+	}
+	say("wcn3990: 13: +%llu ms: THE FIRMWARE IS READY: mac %02x:%02x:%02x:%02x:%02x:%02x, status %u\n", now_ms() - began, mac[0],
+	    mac[1], mac[2], mac[3], mac[4], mac[5], event != NULL && event_length >= 36 ? r32(event + 32) : 0);
+
+	/* a station's vdev (0), the channels, a scan on it (ath10k_wmi_start_scan_init()'s values) */
+	wmi_at = 4;
+	wtlv(TAG_VDEV_CREATE_CMD, 20);
+	w32(0); w32(2); w32(0);                                 /* vdev 0, WMI_VDEV_TYPE_STA, no subtype */
+	w32(mac[0] | mac[1] << 8 | mac[2] << 16 | (uint32_t)mac[3] << 24); w32(mac[4] | mac[5] << 8);
+	if (!wmi_send(wmi, WMI_VDEV_CREATE_CMD, "a station's vdev")) {
+		return;
+	}
+	wmi_at = 4;
+	wtlv(TAG_SCAN_CHAN_LIST_CMD, 4);
+	w32(CHANNELS);
+	wtlv(TAG_ARRAY_STRUCT, CHANNELS * (4 + 24));
+	for (unsigned i = 0; i < CHANNELS; i++) {
+		uint32_t mode = channels[i].mhz < 3000 ? 1 : 0;         /* MODE_11G, MODE_11A */
+
+		wtlv(TAG_CHANNEL, 24);
+		w32(channels[i].mhz); w32(channels[i].mhz); w32(0);
+		w32(mode | (channels[i].passive ? 1u << 7 : 0));       /* the mode in the low bits, WMI_CHAN_FLAG_PASSIVE */
+		w32(0 | 40u << 8 | 40u << 16);                          /* min, max, reg power (0.5 dBm) */
+		w32(0 | 40u << 8);                                      /* antenna gain, max tx power */
+	}
+	if (!wmi_send(wmi, WMI_SCAN_CHAN_LIST_CMD, "the channels")) {
+		return;
+	}
+	wmi_at = 4;
+	wtlv(TAG_START_SCAN_CMD, 15 * 4 + 6 * 4 + 16);
+	w32(1); w32(1); w32(0); w32(1);                         /* scan 1, requester 1, vdev 0, priority low */
+	w32(0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x100);              /* started, completed, bss/foreign channel, dequeued, exit */
+	w32(50); w32(150); w32(50); w32(500); w32(0); w32(0); w32(0); w32(20000); w32(5);
+	w32((0x4 | 0x8 | 0x10) ^ 0x20);                         /* cck, ofdm rates, channel stats; probe filter inverted (ath10k) */
+	w32(0); w32(CHANNELS); w32(1); w32(0); w32(0); w32(3);  /* burst, channels, bssids, ssids, ie, probes */
+	w32(mac[0] | mac[1] << 8 | mac[2] << 16 | (uint32_t)mac[3] << 24); w32(mac[4] | mac[5] << 8);
+	w32(0); w32(0);                                         /* (mac mask) */
+	wtlv(TAG_ARRAY_UINT32, CHANNELS * 4);
+	for (unsigned i = 0; i < CHANNELS; i++) {
+		w32(channels[i].mhz);
+	}
+	wtlv(TAG_ARRAY_FIXED_STRUCT, 0);                        /* no ssids */
+	wtlv(TAG_ARRAY_FIXED_STRUCT, 8);                        /* the broadcast bssid */
+	w32(0xffffffffu); w32(0xffff);
+	wtlv(TAG_ARRAY_BYTE, 0);                                /* no extra ies */
+	if (!wmi_send(wmi, WMI_START_SCAN_CMD, "a scan of every channel")) {
+		return;
+	}
+	say("wcn3990: 14: SCANNING for %u s\n", seconds);
+	began = now_ms();
+	while (now_ms() - began < seconds * 1000ull) {
+		id = wmi_event(wmi, 1000, &body, &body_length);
+		if (id == WMI_MGMT_RX_EVENT) {
+			note_frame(body, body_length);
+		} else if (id == WMI_SCAN_EVENT) {
+			event = wmi_find(body, body_length, TAG_SCAN_EVENT, &event_length);
+			if (event != NULL && event_length >= 8) {
+				uint32_t type = r32(event);
+
+				if (type & 0x3 || type & 0x40) {
+					say("wcn3990: 14: +%llu ms: the scan %s (reason %u)\n", now_ms() - began, type & 0x1 ? "has started" :
+					    type & 0x2 ? "HAS COMPLETED" : "FAILED TO START", r32(event + 4));
+				}
+				if (type & 0x2) {
+					break;
+				}
+			}
+		} else if (id != 0) {
+			say("wcn3990: 14:   (event %#x)\n", id);
+		}
+	}
+	say("wcn3990: 14: THE SCAN FOUND %u NETWORKS\n", seen_count);
+}
+
+/* ath10k_htc_connect_service() for WMI's control, ath10k_htc_start(), and what the firmware says on WMI's endpoint */
+static void wmi_scan(unsigned wmi, const uint8_t *service_ready, unsigned length);
+static uint8_t service_ready[CE_BUFFER];
+static unsigned service_ready_length;
+
+static void
+htc_wmi(uint32_t level)
 {
 	/* HTC's CONNECT_SERVICE (2) for ATH10K_HTC_SVC_ID_WMI_CONTROL (group 1, index 0: 0x0100), no flags */
 	static const uint8_t connect[8] = { 2, 0, 0x00, 0x01, 0, 0, 0, 0 };
@@ -707,9 +1098,20 @@ htc_wmi(void)
 			/* (WMI-TLV's numbers, ath10k's wmi-tlv.h: the start group's events are 1, 2, 3) */
 			say("wcn3990: 12: A WMI EVENT on endpoint %u: id %#x%s, %u bytes\n", wmi, id, id == 0x1 ? " (SERVICE READY)" :
 			    id == 0x2 ? " (READY)" : id == 0x3 ? " (SERVICE AVAILABLE)" : "", rx_length - 8);
+			if (id == 0x1 && rx_length <= sizeof(service_ready)) {
+				memcpy(service_ready, rx_data, rx_length);
+				service_ready_length = rx_length;
+			}
+		}
+		htc_credits(rx_data, rx_length);
+		if (service_ready_length != 0 && events >= 4) {
+			break;
 		}
 	}
 	say("wcn3990: 12: %u messages after the setup%s\n", events, events ? "" : ": THE FIRMWARE SAID NOTHING ON WMI");
+	if (level >= 5 && service_ready_length != 0) {
+		wmi_scan(wmi, service_ready + 8 + 4, service_ready_length - 8 - 4);
+	}
 }
 
 static void
@@ -884,7 +1286,7 @@ copy_engines(uint32_t level)
 	show_htc(rx_ce, rx_data, rx_length);
 	(void)seen;
 	if (level >= 4) {
-		htc_wmi();
+		htc_wmi(level);
 	}
 }
 
