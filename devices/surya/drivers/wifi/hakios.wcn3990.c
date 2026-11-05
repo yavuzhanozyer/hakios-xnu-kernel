@@ -19,6 +19,7 @@
  *   8  "firmware ready" waited for (wcn3990_wait seconds, default 15)
  *   9  (wcn3990=2) the configuration: snoc.c's copy engine pipes, the map of HTC services to them, the shadow registers
  *  10  (wcn3990=2) the mode "mission": the radio on, waiting for its driver at the copy engines
+ *  12  (wcn3990=4) HTC: the WMI control service connected, setup complete, and the firmware's first WMI events
  *  11  (wcn3990=3) the copy engines: the WLAN's stream through the SMMU, three engines' rings, buffers to receive into,
  *      and the firmware's first HTC message ("ready") watched for (see copy_engines())
  *
@@ -558,6 +559,154 @@ ce_destination(unsigned ce, uint64_t ring, uint32_t entries)
 	wl_wr(base + CE_DST_WM, (wl_rd(base + CE_DST_WM) & ~0xffffffffu) | (entries & 0xffff));
 }
 
+/*
+ * ---- step 12 (wcn3990=4): HTC, and the WMI service connected (ath10k's htc.c) ----------------------------------------------
+ *
+ * What the destination rings bring is taken in ring order and the entry given back (its buffer posted again, the write index
+ * moved on), as ath10k_snoc_rx_post() keeps them full. CE0 sends: a descriptor (the buffer's address, its length, the
+ * endpoint as its transfer id) and the source ring's write index through its shadow register (0x32000 for CE0: the shadow
+ * registers were configured with the mode), as ath10k_ce_send_nolock_64() does on the WCN3990.
+ */
+#define CE_SHADOW_SR_WR_INDEX_CE0 0x00032000u
+#define CE_TX_BUFFERS             0x50000u
+
+static struct {
+	unsigned ce;
+	uint32_t entries, ring_at, buffers_at, read, write;
+} rx[2];
+static uint32_t tx_write;
+static volatile uint8_t *shadow;
+static uint8_t rx_data[512];
+static unsigned rx_length, rx_ce;
+
+static bool
+ce_receive(uint32_t ms)
+{
+	uint64_t began = now_ms();
+
+	do {
+		for (unsigned r = 0; r < 2; r++) {
+			volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + rx[r].ring_at);
+			uint32_t e = rx[r].read;
+
+			if (ring[e].nbytes != 0) {
+				unsigned length = ring[e].nbytes;
+				const volatile uint8_t *buffer = dma + rx[r].buffers_at + e * CE_BUFFER;
+
+				rx_length = length < sizeof(rx_data) ? length : sizeof(rx_data);
+				for (unsigned i = 0; i < rx_length; i++) {
+					rx_data[i] = buffer[i];
+				}
+				rx_ce = rx[r].ce;
+				ring[e].nbytes = 0;
+				rx[r].read = (e + 1) % rx[r].entries;
+				rx[r].write = (rx[r].write + 1) % rx[r].entries;
+				__asm__ volatile ("dsb sy" ::: "memory");
+				wl_wr(CE_BASE(rx[r].ce) + CE_DST_WR_INDEX, rx[r].write);
+				rx_length = length;
+				return true;
+			}
+		}
+		delay_for_interval(1, NSEC_PER_MSEC);
+	} while (now_ms() - began < ms);
+	return false;
+}
+
+/* One HTC message to an endpoint through CE0: the 8 bytes of its header, then the payload. */
+static bool
+htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
+{
+	static uint8_t sequence;
+	volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + 0x1000);
+	uint32_t slot = tx_write;
+	volatile uint8_t *buffer = dma + CE_TX_BUFFERS + slot * CE_BUFFER;
+	uint64_t pa = CE_DMA_PHYS + CE_TX_BUFFERS + (uint64_t)slot * CE_BUFFER;
+
+	if (shadow == NULL) {
+		shadow = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE + CE_SHADOW_SR_WR_INDEX_CE0, 0x1000);
+	}
+	if (shadow == NULL || length + 8 > CE_BUFFER) {
+		return false;
+	}
+	buffer[0] = endpoint;
+	buffer[1] = 0;
+	buffer[2] = (uint8_t)length;
+	buffer[3] = (uint8_t)(length >> 8);
+	buffer[4] = 0;
+	buffer[5] = sequence++;
+	buffer[6] = 0;
+	buffer[7] = 0;
+	for (unsigned i = 0; i < length; i++) {
+		buffer[8 + i] = payload[i];
+	}
+	ring[slot].addr = (pa & 0xffffffffull) | ((pa >> 32) & 0x1f) << 32;
+	ring[slot].nbytes = (uint16_t)(length + 8);
+	ring[slot].flags = (uint16_t)(endpoint << 4);
+	ring[slot].hash = 0;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	tx_write = (slot + 1) % 32;
+	*(volatile uint32_t *)shadow = tx_write;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	return true;
+}
+
+static void show_htc(unsigned ce, const volatile uint8_t *data, unsigned length);
+
+/* ath10k_htc_connect_service() for WMI's control, ath10k_htc_start(), and what the firmware says on WMI's endpoint */
+static void
+htc_wmi(void)
+{
+	/* HTC's CONNECT_SERVICE (2) for ATH10K_HTC_SVC_ID_WMI_CONTROL (group 1, index 0: 0x0100), no flags */
+	static const uint8_t connect[8] = { 2, 0, 0x00, 0x01, 0, 0, 0, 0 };
+	/* SETUP_COMPLETE_EX (5): no flags, no bundling */
+	static const uint8_t complete[12] = { 5, 0 };
+	unsigned wmi = 0xff, events = 0;
+
+	say("wcn3990: 12: HTC: connect the WMI control service (0x0100) on endpoint 0 through CE0\n");
+	if (!htc_send(0, connect, sizeof(connect))) {
+		say("wcn3990: 12: CE0 cannot send\n");
+		return;
+	}
+	for (unsigned tries = 0; tries < 8 && wmi == 0xff; tries++) {
+		if (!ce_receive(3000)) {
+			say("wcn3990: 12: NO ANSWER to the connection within 3 s; CE0 srri %#x, misc status %#x\n",
+			    wl_rd(CE_BASE(0) + CE_CURRENT_SRRI), wl_rd(CE_BASE(0) + CE_MISC_STATUS));
+			return;
+		}
+		show_htc(rx_ce, rx_data, rx_length);
+		if (rx_length >= 8 + 8 && rx_data[0] == 0 && (rx_data[8] | rx_data[9] << 8) == 3) {
+			unsigned service = rx_data[10] | rx_data[11] << 8, status = rx_data[12], max = rx_data[14] | rx_data[15] << 8;
+
+			say("wcn3990: 12: THE SERVICE %#x IS CONNECTED: status %u, endpoint %u, messages of up to %u bytes\n", service,
+			    status, rx_data[13], max);
+			if (status != 0) {
+				return;
+			}
+			wmi = rx_data[13];
+		}
+	}
+	if (wmi == 0xff) {
+		say("wcn3990: 12: no answer to the connection among what came\n");
+		return;
+	}
+	say("wcn3990: 12: HTC: setup complete\n");
+	if (!htc_send(0, complete, sizeof(complete))) {
+		return;
+	}
+	/* the firmware's first WMI events: the service ready (WMI_TLV_SERVICE_READY_EVENTID 0x4001), then perhaps more */
+	while (events < 6 && ce_receive(events == 0 ? 10000 : 2000)) {
+		events++;
+		show_htc(rx_ce, rx_data, rx_length);
+		if (rx_data[0] == wmi && rx_length >= 12) {
+			unsigned id = (rx_data[8] | rx_data[9] << 8 | rx_data[10] << 16 | rx_data[11] << 24) & 0xffffff;
+
+			say("wcn3990: 12: A WMI EVENT on endpoint %u: id %#x%s, %u bytes\n", wmi, id, id == 0x4001 ? " (SERVICE READY)" :
+			    id == 0x4002 ? " (READY)" : "", rx_length - 8);
+		}
+	}
+	say("wcn3990: 12: %u messages after the setup%s\n", events, events ? "" : ": THE FIRMWARE SAID NOTHING ON WMI");
+}
+
 static void
 show_htc(unsigned ce, const volatile uint8_t *data, unsigned length)
 {
@@ -606,7 +755,7 @@ rails_on(void)
 }
 
 static void
-copy_engines(void)
+copy_engines(uint32_t level)
 {
 	static const struct { unsigned ce; uint32_t entries; uint32_t ring_at, buffers_at; } in[2] = {
 		{ 1, 32, 0x2000, 0x10000 }, { 2, 64, 0x3000, 0x20000 },
@@ -710,29 +859,28 @@ copy_engines(void)
 	}
 	say("wcn3990: 11: CE0 a source ring of 32, CE1 and CE2 destination rings of 32 and 64 with buffers posted; read indices in "
 	    "our memory at %#llx; watching for %u s\n", CE_DMA_PHYS, seconds);
-	began = now_ms();
-	while (now_ms() - began < seconds * 1000ull && seen < 8) {
-		for (unsigned r = 0; r < 2; r++) {
-			volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + in[r].ring_at);
-
-			for (uint32_t e = 0; e < in[r].entries; e++) {
-				if (ring[e].nbytes != 0) {
-					unsigned length = ring[e].nbytes;
-
-					say("wcn3990: 11: +%llu ms: CE%u's entry %u is filled (the engine's read index now %#x)\n",
-					    now_ms() - began, in[r].ce, e, *(volatile uint32_t *)(dma + 4 * in[r].ce) >> 16);
-					show_htc(in[r].ce, dma + in[r].buffers_at + e * CE_BUFFER, length);
-					ring[e].nbytes = 0;
-					seen++;
-				}
-			}
-		}
-		delay_for_interval(1, NSEC_PER_MSEC);
+	for (unsigned r = 0; r < 2; r++) {
+		rx[r].ce = in[r].ce;
+		rx[r].entries = in[r].entries;
+		rx[r].ring_at = in[r].ring_at;
+		rx[r].buffers_at = in[r].buffers_at;
+		rx[r].read = 0;
+		rx[r].write = in[r].entries - 1;
 	}
-	say("wcn3990: 11: %s; CE1 drri %#x, misc status %#x; CE2 drri %#x, misc status %#x\n", seen ?
-	    "THE FIRMWARE HAS SPOKEN THROUGH THE COPY ENGINES" : "NOTHING CAME THROUGH THE COPY ENGINES",
-	    wl_rd(CE_BASE(1) + CE_CURRENT_DRRI), wl_rd(CE_BASE(1) + CE_MISC_STATUS), wl_rd(CE_BASE(2) + CE_CURRENT_DRRI),
-	    wl_rd(CE_BASE(2) + CE_MISC_STATUS));
+	tx_write = wl_rd(CE_BASE(0) + CE_SR_WR_INDEX) & 31;
+	began = now_ms();
+	if (!ce_receive(seconds * 1000)) {
+		say("wcn3990: 11: NOTHING CAME THROUGH THE COPY ENGINES in %u s; CE1 drri %#x, misc status %#x; CE2 drri %#x, misc "
+		    "status %#x\n", seconds, wl_rd(CE_BASE(1) + CE_CURRENT_DRRI), wl_rd(CE_BASE(1) + CE_MISC_STATUS),
+		    wl_rd(CE_BASE(2) + CE_CURRENT_DRRI), wl_rd(CE_BASE(2) + CE_MISC_STATUS));
+		return;
+	}
+	say("wcn3990: 11: +%llu ms: THE FIRMWARE HAS SPOKEN THROUGH THE COPY ENGINES\n", now_ms() - began);
+	show_htc(rx_ce, rx_data, rx_length);
+	(void)seen;
+	if (level >= 4) {
+		htc_wmi();
+	}
 }
 
 static void
@@ -893,7 +1041,7 @@ exchange(void)
 	}
 	/* 9 and 10 (wcn3990=2): the configuration and the mode, as ath10k sends them when its driver starts */
 	if (level >= 2 && mission() && level >= 3) {
-		copy_engines();
+		copy_engines(level);
 	}
 out:
 	say("wcn3990: the exchange ends %llu ms after it began: \"MSA ready\" %s, \"FIRMWARE READY\" %s, mission mode %s\n",
