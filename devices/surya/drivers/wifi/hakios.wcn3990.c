@@ -585,6 +585,7 @@ static struct {
 	uint32_t entries, ring_at, buffers_at, read, write;
 } rx[RX_RINGS];
 static uint32_t tx_write, tx3_write;
+static unsigned wmi_endpoint;           /* (WMI's endpoint: defined, 0xff until connected, with its credits below) */
 static unsigned htt_endpoint = 0xff;
 static volatile uint8_t *shadow;
 static uint8_t rx_data[CE_BUFFER];
@@ -645,7 +646,8 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 		return false;
 	}
 	buffer[0] = endpoint;
-	buffer[1] = 0;
+	/* ath10k_htc_prepare_tx_skb(): an endpoint with credit flow (WMI's) asks for its credits back, NEED_CREDIT_UPDATE */
+	buffer[1] = endpoint == wmi_endpoint ? 0x01 : 0;
 	buffer[2] = (uint8_t)length;
 	buffer[3] = (uint8_t)(length >> 8);
 	buffer[4] = 0;
@@ -701,7 +703,7 @@ static void show_htc(unsigned ce, const volatile uint8_t *data, unsigned length)
  * trailer's length in byte 4 of the header; its records, id 1 "credits", are pairs of endpoint and count), as
  * ath10k_htc_process_trailer() reads them. A WMI command takes as many credits as its credit size (2184) goes into it.
  */
-static unsigned wmi_credits = 2, wmi_credit_size = 2184, wmi_endpoint = 0xff;
+static unsigned wmi_credits = 2, wmi_credit_size = 2184, wmi_endpoint = 0xff, credit_reports;
 
 static void
 htc_credits(const uint8_t *m, unsigned length)
@@ -726,6 +728,10 @@ htc_credits(const uint8_t *m, unsigned length)
 			for (unsigned i = 0; i + 1 < record; i += 2) {
 				if (m[at + 2 + i] == wmi_endpoint) {
 					wmi_credits += m[at + 3 + i];
+					if (credit_reports++ < 6) {
+						say("wcn3990: 13:   (the firmware gives %u credits back to endpoint %u: %u now)\n", m[at + 3 + i],
+						    wmi_endpoint, wmi_credits);
+					}
 				}
 			}
 		}
