@@ -1112,8 +1112,13 @@ static unsigned service_ready_length;
 static void
 htc_wmi(uint32_t level)
 {
-	/* HTC's CONNECT_SERVICE (2) for ATH10K_HTC_SVC_ID_WMI_CONTROL (group 1, index 0: 0x0100), no flags */
-	static const uint8_t connect[8] = { 2, 0, 0x00, 0x01, 0, 0, 0, 0 };
+	/*
+	 * HTC's CONNECT_SERVICE (2) for ATH10K_HTC_SVC_ID_WMI_CONTROL (group 1, index 0: 0x0100), with every transmit credit
+	 * HTC's ready gave (2) asked for it, in RECV_ALLOC (flags [15:8]), as ath10k_htc_get_credit_allocation() gives them:
+	 * the firmware posts that many buffers on WMI's pipe (CE3). With 0 there, it posted none, and CE3 never moved
+	 * (5 November 2026).
+	 */
+	static const uint8_t connect[8] = { 2, 0, 0x00, 0x01, 0x00, 0x02, 0, 0 };
 	/* SETUP_COMPLETE_EX (5): no flags, no bundling */
 	static const uint8_t complete[12] = { 5, 0 };
 	unsigned wmi = 0xff, events = 0;
@@ -1123,7 +1128,8 @@ htc_wmi(uint32_t level)
 	 * group 3 index 0: 0x0300), then WMI's, then HTC started (setup complete)
 	 */
 	{
-		static const uint8_t connect_htt[8] = { 2, 0, 0x00, 0x03, 0, 0, 0, 0 };
+		/* (no credits, and credit flow control off: ATH10K_HTC_CONN_FLAGS_DISABLE_CREDIT_FLOW_CTRL, as for every service but WMI) */
+		static const uint8_t connect_htt[8] = { 2, 0, 0x00, 0x03, 0x08, 0x00, 0, 0 };
 
 		say("wcn3990: 12: HTC: connect HTT's data service (0x0300) on endpoint 0 through CE0\n");
 		if (htc_send(0, connect_htt, sizeof(connect_htt)) && ce_receive(3000)) {
