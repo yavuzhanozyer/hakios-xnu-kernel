@@ -630,7 +630,7 @@ ce_receive(uint32_t ms)
 static bool
 htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 {
-	static uint8_t sequence;
+	static uint8_t sequence[8];             /* (per endpoint, as ath10k's ep->seq_no) */
 	bool wmi = endpoint != 0;
 	volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + (wmi ? CE3_RING : 0x1000));
 	uint32_t slot = wmi ? tx3_write : tx_write;
@@ -648,7 +648,7 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 	buffer[2] = (uint8_t)length;
 	buffer[3] = (uint8_t)(length >> 8);
 	buffer[4] = 0;
-	buffer[5] = sequence++;
+	buffer[5] = sequence[endpoint & 7]++;
 	buffer[6] = 0;
 	buffer[7] = 0;
 	for (unsigned i = 0; i < length; i++) {
@@ -1006,6 +1006,18 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	delay_for_interval(50, NSEC_PER_MSEC);
 	say("wcn3990: 13:   CE3 after the init: write index %u (ours), its read index %#x (srri), misc status %#x; credits left %u\n",
 	    tx3_write, wl_rd(CE_BASE(3) + CE_CURRENT_SRRI), wl_rd(CE_BASE(3) + CE_MISC_STATUS), wmi_credits);
+	{
+		/* to tell: CE0's indices (it works) beside CE3's, as registers and in our memory; and the SMMU's faults */
+		vm_offset_t smmu = ml_io_map(SMMU_PHYS, 0x2000), banks = ml_io_map(SMMU_PHYS + 0x80000 + 0x1000 * 60, 0x1000);
+
+		say("wcn3990: 13:   CE0: write index %u, srri %#x, rri %#x; CE3: rri %#x; CE1: rri %#x; CE2: rri %#x\n", tx_write,
+		    wl_rd(CE_BASE(0) + CE_CURRENT_SRRI), *(volatile uint32_t *)(dma + 0), *(volatile uint32_t *)(dma + 12),
+		    *(volatile uint32_t *)(dma + 4), *(volatile uint32_t *)(dma + 8));
+		say("wcn3990: 13:   SMMU: global fault %#x (syndrome %#x %#x); context bank 60: fault %#x, address %#x%08x, syndrome %#x\n",
+		    *(volatile uint32_t *)(smmu + 0x48), *(volatile uint32_t *)(smmu + 0x50), *(volatile uint32_t *)(smmu + 0x54),
+		    *(volatile uint32_t *)(banks + 0x58), *(volatile uint32_t *)(banks + 0x64), *(volatile uint32_t *)(banks + 0x60),
+		    *(volatile uint32_t *)(banks + 0x68));
+	}
 	began = now_ms();
 	while ((id = wmi_event(wmi, 5000, &body, &body_length)) != 0 && id != WMI_READY_EVENT) {
 		say("wcn3990: 13:   (event %#x while waiting for ready)\n", id);
