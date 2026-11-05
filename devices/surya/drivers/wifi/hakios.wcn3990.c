@@ -701,7 +701,7 @@ static void show_htc(unsigned ce, const volatile uint8_t *data, unsigned length)
  * trailer's length in byte 4 of the header; its records, id 1 "credits", are pairs of endpoint and count), as
  * ath10k_htc_process_trailer() reads them. A WMI command takes as many credits as its credit size (2184) goes into it.
  */
-static unsigned wmi_credits = 2, wmi_credit_size = 2184;
+static unsigned wmi_credits = 2, wmi_credit_size = 2184, wmi_endpoint = 0xff;
 
 static void
 htc_credits(const uint8_t *m, unsigned length)
@@ -724,7 +724,7 @@ htc_credits(const uint8_t *m, unsigned length)
 		}
 		if (id == 1) {
 			for (unsigned i = 0; i + 1 < record; i += 2) {
-				if (m[at + 2 + i] == 1) {
+				if (m[at + 2 + i] == wmi_endpoint) {
 					wmi_credits += m[at + 3 + i];
 				}
 			}
@@ -1033,6 +1033,15 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	}
 	say("wcn3990: 13: +%llu ms: THE FIRMWARE IS READY: mac %02x:%02x:%02x:%02x:%02x:%02x, status %u\n", now_ms() - began, mac[0],
 	    mac[1], mac[2], mac[3], mac[4], mac[5], event != NULL && event_length >= 36 ? r32(event + 32) : 0);
+	if ((mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) == 0) {
+		/*
+		 * (the WCN3990's firmware has no address of its own: Android gives it one from the phone's own data. Until that is
+		 * read here, a locally administered one, the same at every boot: 02:68:6b + the low three bytes of the chip id)
+		 */
+		mac[0] = 0x02; mac[1] = 0x68; mac[2] = 0x6b; mac[3] = 0x03; mac[4] = 0x02; mac[5] = 0x14;
+		say("wcn3990: 13: the firmware gave no address: %02x:%02x:%02x:%02x:%02x:%02x (locally administered) for the vdev\n",
+		    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	}
 
 	/* a station's vdev (0), the channels, a scan on it (ath10k_wmi_start_scan_init()'s values) */
 	wmi_at = 4;
@@ -1164,6 +1173,7 @@ htc_wmi(uint32_t level)
 				return;
 			}
 			wmi = rx_data[13];
+			wmi_endpoint = wmi;
 		}
 	}
 	if (wmi == 0xff) {
