@@ -584,6 +584,7 @@ static struct {
 	uint32_t entries, ring_at, buffers_at, read, write;
 } rx[2];
 static uint32_t tx_write, tx3_write;
+static unsigned htt_endpoint = 0xff;
 static volatile uint8_t *shadow;
 static uint8_t rx_data[CE_BUFFER];
 static unsigned rx_length, rx_ce;
@@ -819,6 +820,14 @@ wmi_event(unsigned wmi, uint32_t ms, const uint8_t **body, unsigned *length)
 			return 0;
 		}
 		htc_credits(rx_data, rx_length);
+		if (rx_data[0] != wmi || rx_length < 12) {
+			char hex[3 * 16 + 1] = "";
+
+			for (unsigned i = 0; i < rx_length && i < 16; i++) {
+				snprintf(hex + 3 * i, 4, " %02x", rx_data[i]);
+			}
+			say("wcn3990: 13:   (CE%u: %u bytes for endpoint %u:%s)\n", rx_ce, rx_length, rx_data[0], hex);
+		}
 		if (rx_data[0] == wmi && rx_length >= 12) {
 			unsigned payload = rx_data[2] | rx_data[3] << 8;
 			unsigned trailer = (rx_data[1] & 0x2) ? rx_data[4] : 0;
@@ -971,6 +980,9 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	if (!wmi_send(wmi, WMI_INIT_CMD, "init")) {
 		return;
 	}
+	delay_for_interval(50, NSEC_PER_MSEC);
+	say("wcn3990: 13:   CE3 after the init: write index %u (ours), its read index %#x (srri), misc status %#x; credits left %u\n",
+	    tx3_write, wl_rd(CE_BASE(3) + CE_CURRENT_SRRI), wl_rd(CE_BASE(3) + CE_MISC_STATUS), wmi_credits);
 	began = now_ms();
 	while ((id = wmi_event(wmi, 5000, &body, &body_length)) != 0 && id != WMI_READY_EVENT) {
 		say("wcn3990: 13:   (event %#x while waiting for ready)\n", id);
@@ -1070,6 +1082,25 @@ htc_wmi(uint32_t level)
 	static const uint8_t complete[12] = { 5, 0 };
 	unsigned wmi = 0xff, events = 0;
 
+	/*
+	 * ath10k_core_start()'s order: HTT's data service connected first (ath10k_htt_connect(), ATH10K_HTC_SVC_ID_HTT_DATA_MSG,
+	 * group 3 index 0: 0x0300), then WMI's, then HTC started (setup complete)
+	 */
+	{
+		static const uint8_t connect_htt[8] = { 2, 0, 0x00, 0x03, 0, 0, 0, 0 };
+
+		say("wcn3990: 12: HTC: connect HTT's data service (0x0300) on endpoint 0 through CE0\n");
+		if (htc_send(0, connect_htt, sizeof(connect_htt)) && ce_receive(3000)) {
+			show_htc(rx_ce, rx_data, rx_length);
+			if (rx_length >= 16 && (rx_data[8] | rx_data[9] << 8) == 3) {
+				say("wcn3990: 12: THE SERVICE %#x IS CONNECTED: status %u, endpoint %u, messages of up to %u bytes\n",
+				    rx_data[10] | rx_data[11] << 8, rx_data[12], rx_data[13], rx_data[14] | rx_data[15] << 8);
+				htt_endpoint = rx_data[13];
+			}
+		} else {
+			say("wcn3990: 12: no answer to HTT's connection\n");
+		}
+	}
 	say("wcn3990: 12: HTC: connect the WMI control service (0x0100) on endpoint 0 through CE0\n");
 	if (!htc_send(0, connect, sizeof(connect))) {
 		say("wcn3990: 12: CE0 cannot send\n");
