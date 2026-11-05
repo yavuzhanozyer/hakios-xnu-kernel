@@ -1,131 +1,105 @@
-# HakiOS
+# HakiOS on the POCO X3 NFC (`surya`)
 
-English · [中文](README.zh.md) · [Українська](README.uk.md)
+English · [Türkçe](#türkçe)
 
-**Apple's open-source Darwin kernel (XNU, xnu-8796.121.2) on Android phones with a Qualcomm SoC**, the way Android is Linux on
-phones: a boot loader of its own, drivers of its own, a configuration system and a version of its own. The same kernel runs in
-QEMU with nothing of Apple's and nothing of any phone's (`make qemu-open`).
+**Apple's open-source Darwin kernel (XNU, xnu-8796.121.2) on the POCO X3 NFC** (Xiaomi `surya`, Qualcomm SM7150-AC
+"Snapdragon 732G"): the [HakiOS](https://github.com/oosexgang/hakios-xnu-kernel) kernel, loader and drivers, with this phone's own
+device layer in [`devices/surya`](devices/surya). A research bench, not a ROM: it runs from RAM, booted with `fastboot boot`, and a reboot
+gives the phone back to its own Android. Nothing is flashed.
 
-**Documentation: [docs/](docs/index.md)**, also on the project's website (`hakios-web`). Start with [Getting started](docs/getting-started/index.md), [Port a device](docs/porting/index.md) or the
-[Architecture](docs/concepts/architecture.md).
+This is a fork of [oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel), whose reference phone is the POCO X5
+Pro 5G (`redwood`, SC7280); it follows upstream's `main` and adds the SM7150 family and `surya`. Upstream's documentation,
+[docs/](docs/index.md), holds for everything common.
 
-## What works
+## What works on surya
 
-| | POCO X5 Pro 5G (`redwood`) | QEMU `virt` |
-|---|---|---|
-| Lock screen, home screen, Control Center, the stock apps | yes | yes (slow: the CPU is emulated) |
-| Touch, multitouch, buttons | yes | yes |
-| All 8 CPU cores, the big one at 2.4 GHz | yes | no |
-| GPU rendering on Adreno (OpenGL ES through Mesa) | yes | no |
-| Speakers, microphone, the battery's level | yes | sound only |
-| Wi-Fi, cameras, vibration | yes | network only |
-| `/private/var` kept across reboots, Sileo, SSH | yes | no |
-| Metal | partly: a device Metal loads; buffers and libraries; nothing drawn yet | partly |
-| Cellular | partly: the modem is up, the SIM bound, the network seen; no registration yet | no |
-| Bluetooth, charging under this kernel, Apple's services | no | no |
+As [`devices/surya/device.conf`](devices/surya/device.conf) records it, each row seen on the phone under HakiOS unless it says otherwise
+(the dates are the first time). The boot-arguments in brackets are what turns a part on; `make surya_defconfig` sets the ones that work.
 
-Every part, as each device's own `device.conf` records it: [Devices](docs/devices/index.md). The rows about the lock screen and the
-apps describe what happens when you add layer 2 below yourself.
+| | POCO X3 NFC (`surya`) |
+|---|---|
+| Boot to the lock screen and the home screen, the stock apps | yes: Darwin 16.5 user space from RAM, drawn by the CPU on UEFI's framebuffer (1080 x 2400) |
+| Touch, multitouch | yes: Novatek NT36672C on SPI, its firmware sent over SPI (`touchscreen=1`) |
+| Buttons: power, volume up and down | yes: PM6150 / PM6150L (`buttons_pon=0x008 buttons_pon_gen=2 buttons_volup=0x4c1`) |
+| All 8 CPU cores and their clocks | yes: the kernel on core 7, the small cores at 1804 MHz, the big ones at 2304 MHz through OSM (`cpus=8 bootcpu=7 cpufreq=1 cpufreq_osm=1`) |
+| Temperature sensors | yes: both TSENS blocks, 25 of 32 sensors (`thermal=1 thermal_table=2`) |
+| Sound: both speakers, in stereo, iOS's volume | yes: the audio DSP, TERT MI2S, two TAS2562 amplifiers (`adsp=1 adsp_sm7150=1 sound=4`); no speaker protection, 12 dB under the amplifiers' full level |
+| Ringtones and alert tones | written (the system image keeps `Library/Ringtones`), not yet heard |
+| The battery's level | yes: from UEFI's charger drivers (`battery=1`); charging under this kernel not seen |
+| Storage | partly: read through the loader (`ufs=2`), as the modem's file systems; writing not tried |
+| Modem | partly: up, linked (GLINK, QRTR), 39 services, its files served (`modem_sm7150=1 modem_step=10 modem_keep=1 ufs=2`); no SIM or network asked yet |
+| Wi-Fi | partly: the WCN3990's firmware ready and in mission mode on the modem (`wcn3990=2`); its radio driver (ath10k's copy engines, HTC, WMI, HTT) is being written, so no scan and no connection yet |
+| GPU | partly: the Adreno 618's block alive (steps 1-6, `adreno=6 adreno_a618=1`); the GMU's firmware, HFI and the 3D core not yet, so no OpenGL ES and no Metal |
+| Microphones, cameras, flashlight, vibration, Bluetooth, cellular data and calls | no |
+| Apple's services (activation, Apple ID, iCloud, the App Store) | not supported and not a goal |
 
-## The three layers
-
-1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.
-2. **What you put on top**: the kernel can start a user space that you supply. It was built so that it can start the Darwin userland 16.5
-   user space, which you lay out yourself from files you download from Apple; nothing of it is shipped, and nothing is
-   circumvented to get it. Whether you may do that, and whether you want to, is your decision.
-3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
-
-By default the loader goes into RAM through `fastboot boot`, the system lives in RAM for a session, and a reboot brings the phone
-back to its own Android. The one thing written by default is the loader's own log (a few KB) to the `logdump` partition; with
-`ufs_write=1` the kernel writes only to a partition `darwin` that you create yourself. This is a research bench, not a ROM.
+The details, part by part, and what each is waiting for: [devices/surya/README.md](devices/surya/README.md).
 
 ## Quick start
 
-```sh
-git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
-cd hakios
-make doctor           # what this machine lacks, and what to do
-make qemu-open        # the open kernel in QEMU: nothing of Apple's, nothing of a phone's
+On a Linux machine with the build set up ([Getting started](docs/getting-started/index.md)), the phone in fastboot, its bootloader
+unlocked, and its own firmware pulled once from its Android or a recovery ([`devices/surya/pull-firmware.sh`](devices/surya/pull-firmware.sh)):
+
+```
+make surya_defconfig
+make kernel
+MODEM=1 SYSTEM=1 REST=1 userland/build.sh
+./xl reboot
+make phone
 ```
 
-Darwin in QEMU (Linux, 12 GB of disk, Apple's IPSW downloaded for you), and a session on the phone:
-[QEMU](docs/getting-started/qemu.md), [On the phone](docs/getting-started/phone.md).
+`make phone` uploads the loader and the system image, runs the kernel with what `.config` turns on, and leaves the phone in the loader
+for the next run. The log of each run is in `logs/`.
 
-```sh
-make redwood_defconfig   # the phone's configuration: the common kernel + the SC7280's + the phone's own
-make kernel              # the kernel with the drivers that configuration builds
-make phone SECS=600      # a 10-minute session on the phone, in RAM
-```
+## What you bring, and what is never here
 
-## Repositories: common, SoC, device, UEFI
+Nothing of Apple's and no vendor's firmware is in this repository. The Darwin user space you lay out yourself from an IPSW you get
+yourself (`sysimage/unpack.sh`), and the phone's firmware (touch, GPU, audio DSP, modem, Wi-Fi) comes off your own phone; nothing is
+downloaded for you, decrypted or circumvented. Two sets of Linux driver tables (ath10k's, for the WCN3990) are fetched from Linux's
+sources when the kernel is built and are not kept here.
+[What is in the repository, and what never is](docs/index.md#what-is-in-the-repository-and-what-never-is).
 
-| Repository | What |
+## Repositories
+
+| Repository | Contents |
 |---|---|
-| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/main) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
-| [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
-| [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
-| [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
+| [yavuzhanozyer/hakios-xnu-kernel](https://github.com/yavuzhanozyer/hakios-xnu-kernel) | this fork: upstream's kernel port, loader, drivers, user space and tools, with `devices/surya` and the SM7150 layer |
+| [yavuzhanozyer/hakios-uefi](https://github.com/yavuzhanozyer/hakios-uefi) | the firmware that starts the loader (Mu-Silicium); surya's platform package is in [`devices/surya/uefi`](devices/surya/uefi) |
+| [oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) | upstream: the common kernel and its reference phone, the POCO X5 Pro 5G |
+| [`hakios-metal/`](hakios-metal) | Metal's command model on the Adreno, in this tree (not yet running on surya's GPU) |
 
-`devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
-into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).
+## License and legal
 
-```sh
-git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios && cd hakios
-tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
-```
+The XNU patch and the files derived from it are under the Apple Public Source License 2.0 ([LICENSE.APSL](LICENSE.APSL)), the rest under
+MIT ([LICENSE](LICENSE)), as the file headers say. Third parties: [NOTICE](NOTICE),
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), [COMPLIANCE.md](COMPLIANCE.md). What is and is not distributed: [LEGAL.md](LEGAL.md).
+None of this is legal advice.
 
-A device of your own is a repository over the common one: `tools/hakios-device.py new` makes it from the phone's own device tree,
-with every phone driver left out until it is ported. Each driver is an option of the kernel's own configuration (`CONFIG_HAKIOS_*`,
-XNU's `options` and `conf/files`), so a device's defconfig builds exactly the drivers it has.
-[Port a device](docs/porting/index.md), [Drivers in the configuration](docs/drivers-config.md).
+HakiOS is an independent research project. It is **not affiliated with or endorsed by Apple**, nor by Xiaomi; "Darwin", "iPhone", "XNU",
+"Apple", "POCO" and "Xiaomi" are named only to describe what the code works with.
 
-## What is in the repository, and what never is
+## Credits
 
-In it: only our own code and data: the patch to Apple's open-source XNU (`xnu/hakios.patch`, APSL 2.0) and our files, the boot
-loader, our programs and libraries, the tools, `prebuilt/` (built from this source; the loader **without** any Apple data:
-`make loader` makes the one that starts Darwin, on your machine, from your own IPSW), and the device and SoC directories.
+HakiOS is the work of its team (upstream's [README](https://github.com/oosexgang/hakios-xnu-kernel#team)): @oodze, @netusd, @wannqn,
+@hxfuxyyXD, Rhaenja Hun, and Sicilium for the sources. The surya touch driver comes from the earlier ios-sweet port; the SM7150 port is
+@yavuzhanozyer's.
 
-Never in it: any file of Darwin (you build the system image on your machine from an IPSW you get yourself and hand to
-`sysimage/unpack.sh`; nothing is downloaded for you, decrypted or circumvented); the phone's firmware (pulled from your own phone into
-`fw-*/`, which git ignores); keys, certificates, activation, or anything that would make the phone pass as an iPhone to Apple.
+---
 
-## Independent, and Apple-free at the core
+## Türkçe
 
-HakiOS is an independent research project. It is **not affiliated with or endorsed by Apple**;
-"Darwin", "iPhone", "XNU" and "Apple" are named only to describe what the code works with. The core
-kernel, the boot loader and the open tools build and run with nothing of Apple's:
+**POCO X3 NFC (`surya`, SM7150-AC "Snapdragon 732G") üzerinde Apple'ın açık kaynak Darwin çekirdeği (XNU).** Bu depo,
+[oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) deposunun bir çatalıdır; upstream'in referans telefonu
+POCO X5 Pro 5G'dir (`redwood`). Bu çatal upstream'i takip eder ve SM7150 ailesini ve `surya`yı ekler. Telefona hiçbir şey yazılmaz:
+sistem RAM'den çalışır (`fastboot boot`) ve yeniden başlatınca telefon kendi Android'ine döner.
 
-```sh
-make qemu-open      # the open kernel + a placeholder loader + a tiny raw-syscall user space, in QEMU
-```
+**Çalışanlar:** kilit ekranı ve ana ekran, stok uygulamalar (CPU ile çizim), dokunmatik, tuşlar, 8 çekirdek ve frekansları, sıcaklık
+sensörleri, iki hoparlör stereo ve iOS'un ses seviyesi, batarya seviyesi.
 
-No IPSW, no Darwin user space, no firmware. Booting the stock Darwin user space (`make qemu`,
-`make phone`) is an optional path that needs the IPSW and the phone's firmware, which you supply
-from your own device.
+**Kısmen:** depolama (sadece okuma), modem (açık, 39 servis; SIM ve şebeke henüz yok), Wi-Fi (firmware hazır ve "mission" modunda;
+radyo sürücüsü yazılıyor, tarama ve bağlanma henüz yok), GPU (blok canlı, 1-6. adımlar; OpenGL ES ve Metal henüz yok), zil sesleri
+(eklendi, henüz denenmedi).
 
-## Licenses and the legal side
+**Çalışmayanlar:** mikrofonlar, kameralar, flaş, titreşim, Bluetooth, mobil veri ve arama; Apple servisleri hedef değil.
 
-My code is under the license of the files it changes: the XNU patch under the Apple Public Source
-License 2.0 (Apple publishes XNU under it; the terms are met: changes are published as source,
-notices are kept), the rest as the file headers say. Darwin, its images, Apple's trademarks and the
-phone's firmware belong to their owners, are not in this repository and are not distributed by me;
-everyone takes them from their own phone and their own IPSW. "Darwin", "iPhone" and "Apple" are
-named only to describe what the code works with. If you believe a file here infringes anyone's
-rights, open an issue and I will remove it.
-
-The detail is in separate files: `LEGAL.md` (what is and is not distributed, and the limits of
-these statements), `COMPLIANCE.md` (how the APSL 2.0 and other terms are met, and the items still
-to verify), `THIRD_PARTY_LICENSES.md` (every third-party component with origin and license), and
-`NOTICE` (the short canonical list). None of this is legal advice.
-
-hakios is an experimental project focused on bringing darwin to android hardware. our goal is to make hakios free and accessible to everyone.
-
-owners:
-@oodze - founder
-@netusd - adversting / ceo-dev
-@wannqn - dev 
-@hxfuxyyXD - dev
-Rhaenja Hun（杭润嘉） — Developer / Sponsor
-
-tym sicilium for the sources!
-
+Hızlı başlangıç için yukarıdaki komutlar; ayrıntılar [devices/surya/README.md](devices/surya/README.md) dosyasında.

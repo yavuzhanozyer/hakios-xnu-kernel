@@ -45,6 +45,11 @@ fi
 if [ -d xnu-src/xnu-8796.121.2 ]; then
 	xnu/sync-drivers.sh xnu-src/xnu-8796.121.2 || exit 1
 	python3 tools/hakios-config.py kernel --tree xnu-src/xnu-8796.121.2 || exit 1
+	# surya's Wi-Fi: ath10k's message tables for the WCN3990's driver, fetched once and kept out of the repository
+	# (without them the driver builds to a line that says so)
+	if [ -f .config ] && grep -q '^CONFIG_HAKIOS_WCN3990=y' .config; then
+		tools/mk-wlfw10.sh || echo "make-kernel: ath10k's tables could not be made: the WCN3990's exchange is not built in"
+	fi
 fi
 log=${KERNEL_LOG:-xnu-build.log}
 ./xnu-build.sh -k "$@" 2>&1 | tee "$log"

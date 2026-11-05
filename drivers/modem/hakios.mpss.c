@@ -615,6 +615,32 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 
 static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
 
+/*
+ * boot-arg modem_sm7150=1: the SM7150's modem (the POCO X3 NFC), from surya's device tree: qcom,mss@4080000, pas-id 4,
+ * its memory reserved-memory modem_region@8b000000 (132 MB), the shared memory at soc_smem (0x86000000). There is no IPCC:
+ * the doorbells are bits of the APCS's IPC register (syscon@17c0000c): bit 0 the always-on processor's, bit 14 the
+ * modem's SMP2P (qcom,smp2p-modem qcom,ipc <&apcs 0 14>), bit 12 its GLINK (qcom,glink/modem mboxes <&apcs 12>). What
+ * the modem rings comes as interrupts there, which this driver does not take: the shared memory is looked at instead, as
+ * hakios.adsp.c does for the SM7150's audio DSP. Its IPA (v4.2) is not this file's: modem_ipa_fw is 0 there.
+ */
+static uint32_t sm7150;
+static struct block apcs = { "apcs", 0x17c00000, 0x1000 };
+#define APCS_IPC                0x0c
+#define APCS_MPSS_SMP2P         14
+#define APCS_MPSS_GLINK         12
+
+static void
+ring_modem(uint32_t signal)
+{
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << (signal == IPCC_GLINK ? APCS_MPSS_GLINK : APCS_MPSS_SMP2P));
+		return;
+	}
+	need(&ipcc);
+	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | signal);
+}
+
 static struct {
 	uint32_t glink, smp2p, said;
 	uint64_t since;
@@ -628,6 +654,9 @@ static struct {
 static void
 doorbells(void)
 {
+	if (sm7150) {
+		return;         /* (no IPCC there: the modem's doorbells are interrupts, not taken) */
+	}
 	for (unsigned i = 0; i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
@@ -664,6 +693,11 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 static void
 ring_aop(void)
 {
+	if (sm7150) {
+		need(&apcs);
+		wr(apcs.base + APCS_IPC, 1u << 0);
+		return;
+	}
 	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
 }
 
@@ -674,7 +708,9 @@ mailbox_open(void)
 	uint32_t box, size;
 
 	need(&aoss);
-	need(&ipcc);
+	if (!sm7150) {
+		need(&ipcc);
+	}
 	if (get(&aoss, "magic", QMP_MAGIC) != QMP_MAGIC_VALUE || get(&aoss, "version", QMP_VERSION) != 1) {
 		printf("mpss: %u: not a mailbox this knows\n", step);
 		return false;
@@ -875,6 +911,97 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	return -1;
 }
 
+/* A resource's address in RPMh's command database by its name ("ldoc1", ...); 0: none. */
+static uint32_t
+rpmh_address(const char *name)
+{
+	char id[8] = { 0 };
+
+	if (cmd_db == NULL) {
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
+	}
+	if (!(cmd_db->magic[0] == 0xdb && cmd_db->magic[1] == 0x30 && cmd_db->magic[2] == 0x03 && cmd_db->magic[3] == 0x0c)) {
+		return 0;
+	}
+	strlcpy(id, name, sizeof(id));
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &cmd_db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			if (memcmp(entry[i].id, id, sizeof(id)) == 0) {
+				return entry[i].address;
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+ * A PMIC regulator through RPMh, as Linux's qcom-rpmh-regulator.c asks for one (a VRM resource: +0 its voltage in mV, +4
+ * on or off, +8 its mode): the voltage (0: left as it is), the mode (0: left), then on. For the drivers beside the
+ * modem's: surya's WCN3990 has its five rails up so. 0, or < 0.
+ */
+int hakios_mpss_regulator(const char *name, uint32_t millivolts, uint32_t mode, bool on);
+int
+hakios_mpss_regulator(const char *name, uint32_t millivolts, uint32_t mode, bool on)
+{
+	uint32_t address = rpmh_address(name), offsets[3], values[3], count = 0, done = 0;
+	uint64_t began;
+
+	if (address == 0) {
+		printf("mpss: RPMh has no \"%s\"\n", name);
+		return -ENOENT;
+	}
+	if (millivolts != 0) {
+		offsets[count] = 0;
+		values[count++] = millivolts;
+	}
+	if (mode != 0) {
+		offsets[count] = 8;
+		values[count++] = mode;
+	}
+	offsets[count] = 4;
+	values[count++] = on ? 1 : 0;
+	need(&rsc);
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
+		lck_mtx_unlock(&hakios_rsc_lock);
+		printf("mpss: TCS %u of the sequencer is busy: %s is not asked\n", RPMH_TCS, name);
+		return -EBUSY;
+	}
+	printf("mpss: about to ask RPMh for %s (%#x): %u mV, mode %u, %s\n", name, address, millivolts, mode, on ? "on" : "off");
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	for (unsigned c = 0; c < count; c++) {
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c), MSGID_WRITE_WAITED);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c) + 4, address + offsets[c]);
+		wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_COMMAND(c) + 8, values[c]);
+	}
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_WAIT_FOR_DONE, (1u << count) - 1);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, (1u << count) - 1);
+	settle();
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~TCS_TRIGGER);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_ACTIVE_MODE);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) | TCS_TRIGGER);
+	began = now_us();
+	while (now_us() - began < 100000) {
+		done = rd(rsc.base + RSC_IRQ_STATUS) & (1u << RPMH_TCS);
+		if (done) {
+			break;
+		}
+		sleep_us(50);
+	}
+	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
+	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	lck_mtx_unlock(&hakios_rsc_lock);
+	printf("mpss: RPMh %s for %s after %llu us\n", done ? "has done it" : "HAS NOT SAID DONE", name, now_us() - began);
+	return done ? 0 : -ETIMEDOUT;
+}
+
 /* The two rails at that level (Linux's proxy request), or given back (level 0). True: RPMh has said done. */
 static bool
 rails(uint32_t level)
@@ -1026,7 +1153,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
-	announce("read our partition with the modem in the shared memory (0x80900000), and its items");
+	announce("read our partition with the modem in the shared memory, and its items");
 	show_partition();
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (435) is there: it has run since the phone was started", &words);
@@ -1037,8 +1164,10 @@ step_survey(void)
 	    smem_item(ITEM_SMP2P_OURS, &size) ? "there" : "not there", smem_item(478, &size) ? "there" : "NOT THERE",
 	    smem_item(479, &size) ? "there" : "NOT THERE", smem_item(480, &size) ? "there" : "not there (the DSP makes it)");
 	show_crash_reason();
-	need(&ipcc);
-	printf("mpss: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	if (!sm7150) {
+		need(&ipcc);
+		printf("mpss: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	}
 	return smem_partition(SMEM_US, SMEM_MPSS, &size, &size) != 0;
 }
 
@@ -1046,7 +1175,8 @@ step_survey(void)
 
 #define MPSS_MEMORY_DEFAULT     0x8b800000u   /* dt: reserved-memory mpss@..., memory-region of qcom,mss */
 static uint32_t mpss_memory = MPSS_MEMORY_DEFAULT;
-#define MPSS_MEMORY_SIZE        0x0f600000u
+static uint32_t mpss_memory_size = 0x0f600000u;    /* (surya: 0x08400000, modem_region@8b000000) */
+#define MPSS_MEMORY_SIZE        mpss_memory_size
 #define PAS_MPSS_DEFAULT        4               /* dt: qcom,pas-id of qcom,mss */
 static uint32_t pas_mpss = PAS_MPSS_DEFAULT;
 
@@ -1194,6 +1324,29 @@ step_firmware(void)
 		    header[1], header[2], header[3], count, size);
 		goto fail;
 	}
+	/*
+	 * A relocatable image (a segment with bit 27 of its flags, QCOM_MDT_RELOCATABLE, as the SM7150's DSPs have) goes where
+	 * the modem's memory is, each segment as far from the start as it is from the lowest one (Linux's qcom_mdt_load:
+	 * mem_reloc). One that is not goes where it is linked.
+	 */
+	uint32_t base = mpss_memory, linked = ~0u;
+	bool relocatable = false;
+
+	for (uint32_t i = 0; i < count; i++) {
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+			continue;
+		}
+		relocatable |= (segment.flags & (1u << 27)) != 0;
+		linked = segment.paddr < linked ? segment.paddr : linked;
+	}
+	if (relocatable && linked != ~0u) {
+		base = linked;
+		if (base != mpss_memory) {
+			printf("mpss: %u: a relocatable image linked at %#x: loaded at %#x, where the modem's memory is\n", step, base,
+			    mpss_memory);
+		}
+	}
 	for (uint32_t i = 0; i < count; i++) {
 		char name[16];
 
@@ -1204,6 +1357,7 @@ step_firmware(void)
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;
 		}
+		segment.paddr = segment.paddr - base + mpss_memory;     /* (where it goes) */
 		if (segment.paddr < mpss_memory || segment.file_size > segment.memory_size ||
 		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + MPSS_MEMORY_SIZE) {
 			printf("mpss: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
@@ -1363,7 +1517,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+		ring_modem(IPCC_SMP2P);
 	}
 }
 
@@ -1394,14 +1548,13 @@ dsp_ask_to_stop(uint32_t bound_ms)
 		printf("mpss: %u: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", step, state);
 		return false;
 	}
-	need(&ipcc);
 	value_at = at + SMP2P_AT_VALUE((uint32_t)entry);
 	printf("mpss: %u: about to ask the DSP to stop: bit 0 of our entry \"%s\" at %#lx, and its SMP2P doorbell\n", step,
 	    OUR_ENTRY_STOP, smem_phys + value_at);
 	snprintf(last_write, sizeof(last_write), "step %u asked the modem to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	ring_modem(IPCC_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1416,7 +1569,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	ring_modem(IPCC_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
@@ -1441,6 +1594,14 @@ dsp_shutdown(const char *why)
 		return false;
 	}
 	printf("mpss: %u: THE MODEM IS SHUT DOWN\n", step);
+	{
+		/* surya's WCN3990 (devices/surya/drivers/wifi/hakios.wcn3990.c) gave its MSA memory to the modem: back to us now */
+		extern void hakios_wcn3990_modem_down(void) __attribute__((weak));
+
+		if (hakios_wcn3990_modem_down != NULL) {
+			hakios_wcn3990_modem_down();
+		}
+	}
 	if (ipa_loaded) {
 		ipa_firmware_stop();
 		ipa_loaded = false;
@@ -1448,8 +1609,10 @@ dsp_shutdown(const char *why)
 	if (!leaving) {
 		rmtfs_share(false);
 	}
-	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+	if (!sm7150) {
+		need(&ipcc);
+		wr(ipcc.base + IPCC_DISABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+	}
 	doorbells();
 	dsp_started = false;
 	mailbox_send("{class: image, res: load_state, name: modem, val: off}");
@@ -1578,7 +1741,7 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the modem's memory (0x8b800000, 246 MB: memory of nobody's until TrustZone starts "
+	announce("put the image's segments into the modem's memory (memory of nobody's until TrustZone starts "
 	    "the modem), with zeroes where a segment is longer than its file, and read them back");
 	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image.size, VM_WIMG_WCOMB);
 	if (dsp_memory == NULL) {
@@ -1727,7 +1890,11 @@ step_our_item(void)
 	 * driver here). Off unless modem_ipa=1 (valid, off) or 3 (on): with the entry the run of 23 October hung.
 	 */
 	{
-		uint32_t ipa = 3;                       /* (the modem's IPA driver waits for this entry to exist: see the IPA's handshake) */
+		/*
+		 * (the modem's IPA driver waits for this entry to exist: see the IPA's handshake). On the SM7150 no IPA runs here
+		 * (its v4.2 is not this file's): 1, "valid, the clock off", for the modem to keep away from it.
+		 */
+		uint32_t ipa = sm7150 ? 1 : 3;
 
 		PE_parse_boot_argn("modem_ipa", &ipa, sizeof(ipa));
 		if (ipa != 0) {
@@ -1746,8 +1913,7 @@ step_our_item(void)
 	smem_poke(our_item + SMP2P_AT_VERSION, SMP2P_RESTART_ACKS << 8 | SMP2P_VERSION);
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
-	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_SMP2P);
+	ring_modem(IPCC_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("mpss: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -1763,7 +1929,12 @@ step_our_item(void)
 	 * (modem_ipa_item=0: not; our SMMU context maps all of DDR, so the item needs no mapping of its own).
 	 */
 	{
-		uint32_t ipa_item = 497, ipa_size = 0;
+		/*
+		 * Not on the SM7150: its device tree has no qcom,ipa-q6-smem-size, its modem allocates the item itself, and with
+		 * ours there it died at once (3 November 2026: "ipa_ipfltr.c:441: IPA Assert: IPA_SMEM_ALLOC_EX(smem_param) ==
+		 * SMEM_STATUS_SUCCESS failed").
+		 */
+		uint32_t ipa_item = sm7150 ? 0 : 497, ipa_size = 0;
 
 		PE_parse_boot_argn("modem_ipa_item", &ipa_item, sizeof(ipa_item));
 		if (ipa_item != 0) {
@@ -2429,16 +2600,18 @@ step_start(void)
 	have = dsp_words(&last);
 	announce("listen for the modem's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
-	need(&ipcc);
-	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_MPSS; i++) {
-		put(&ipcc, "heard", IPCC_CLEAR, rang);
+	if (!sm7150) {
+		need(&ipcc);
+		for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_MPSS; i++) {
+			put(&ipcc, "heard", IPCC_CLEAR, rang);
+		}
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_GLINK);
 	}
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_SMP2P);
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_MPSS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
 	{
-		uint32_t ipa_fw = 1;
+		uint32_t ipa_fw = sm7150 ? 0 : 1;
 
 		PE_parse_boot_argn("modem_ipa_fw", &ipa_fw, sizeof(ipa_fw));
 		ipa_loaded = ipa_fw != 0 && ipa_firmware_load();
@@ -2728,7 +2901,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+	ring_modem(IPCC_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2959,7 +3132,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_MPSS << 16 | IPCC_GLINK);
+			ring_modem(IPCC_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -3549,7 +3722,7 @@ link_stop(void)
 #define RMTFS_VERSION           1
 #define RMTFS_INSTANCE          0
 #define RMTFS_SECTOR            512
-#define RMTFS_BUFFER_SIZE       0x280000u       /* dt: reg of qcom,rmtfs_sharedmem@0 */
+#define RMTFS_BUFFER_SIZE       (sm7150 ? 0x200000u : 0x280000u)       /* dt: reg of qcom,rmtfs_sharedmem@0 (surya: 2 MB) */
 #define RMTFS_OPEN              1
 #define RMTFS_CLOSE             2
 #define RMTFS_RW_IOVEC          3
@@ -3634,7 +3807,11 @@ rmtfs_buffer_make(void)
 	if (rmtfs_window != NULL) {
 		return true;
 	}
-	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
+	/*
+	 * surya: redwood's 0x9c700000 is inside its framebuffer (cont_splash_region@9c000000), and TrustZone would not share
+	 * it (3 November 2026). Its compute DSP's memory, cdsp_regions@93900000 (30 MB, no-map, never started here), instead.
+	 */
+	rmtfs_buffer_pa = sm7150 ? 0x93900000ull : RMTFS_BUFFER_PA_DEFAULT;
 	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
 	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
 	if (rmtfs_window == NULL) {
@@ -3649,6 +3826,17 @@ rmtfs_buffer_make(void)
 	printf("mpss: %u: the modem's buffer: %u bytes at %#llx (the compute DSP's memory, unused here)\n", step, RMTFS_BUFFER_SIZE,
 	    rmtfs_buffer_pa);
 	return true;
+}
+
+/*
+ * The navigation processor among the buffer's owners, or not: SC7280 Android's rmtfs gives it the buffer too; the SM7150's
+ * device tree names no VMID for it, and TrustZone refused the three (an invalid argument, -2) on surya, 3 November 2026.
+ * modem_no_nav=1 leaves it out anywhere; on the SM7150 it is left out unless modem_nav=1.
+ */
+static bool
+no_nav(void)
+{
+	return option("modem_no_nav") || (sm7150 && !option("modem_nav"));
 }
 
 /*
@@ -3694,12 +3882,12 @@ rmtfs_share(bool in)
 		page->destinations[1].permission = VM_PERM_RW;
 		page->destinations[2].vmid = VMID_NAV;
 		page->destinations[2].permission = VM_PERM_RW;
-		destinations = option("modem_no_nav") ? 2 : 3;
+		destinations = no_nav() ? 2 : 3;
 	} else {
 		page->sources[0] = VMID_HLOS;
 		page->sources[1] = VMID_MSS_MSA;
 		page->sources[2] = VMID_NAV;
-		sources = option("modem_no_nav") ? 2 : 3;
+		sources = no_nav() ? 2 : 3;
 		page->destinations[0].vmid = VMID_HLOS;
 		page->destinations[0].permission = VM_PERM_RW;
 		destinations = 1;
@@ -3733,6 +3921,67 @@ rmtfs_share(bool in)
 		tell("mpss: %u: the shared buffer takes our write: it reads %#x\n", step, *(volatile uint32_t *)(rmtfs_window + 0x200));
 	}
 	return true;
+}
+
+/*
+ * Memory handed by TrustZone from its owners to others (Linux's qcom_scm_assign_mem(), each destination read and write),
+ * for the drivers beside the modem's: surya's WCN3990 gives its MSA memory to the modem and the WLAN with this. 0, or a
+ * negative number: TrustZone's result, or -1000 less its answer when it refused.
+ */
+int hakios_mpss_assign(uint64_t address, uint64_t size, const uint32_t *sources, unsigned source_count,
+    const uint32_t *destinations, unsigned destination_count);
+int
+hakios_mpss_assign(uint64_t address, uint64_t size, const uint32_t *sources, unsigned source_count,
+    const uint32_t *destinations, unsigned destination_count)
+{
+	struct {
+		uint64_t address, size;
+		uint64_t pad0[6];
+		uint32_t sources[8];                    /* +64 */
+		uint32_t pad1[8];
+		struct {                                /* +128 */
+			uint32_t vmid, permission;
+			uint64_t context;
+			uint32_t context_size, unused;
+		} destinations[4];
+		uint8_t pad2[16];
+		uint64_t more[7];                       /* +240 */
+	} *page;
+	vm_offset_t memory = 0;
+	uint64_t answer = ~0ull, pa;
+	int32_t result;
+
+	if (source_count == 0 || source_count > 8 || destination_count == 0 || destination_count > 4) {
+		return -EINVAL;
+	}
+	if (kmem_alloc(kernel_map, &memory, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		return -ENOMEM;
+	}
+	page = (void *)memory;
+	page->address = address;
+	page->size = size;
+	for (unsigned i = 0; i < source_count; i++) {
+		page->sources[i] = sources[i];
+	}
+	for (unsigned i = 0; i < destination_count; i++) {
+		page->destinations[i].vmid = destinations[i];
+		page->destinations[i].permission = VM_PERM_RW;
+	}
+	pa = kvtophys(memory);
+	page->more[0] = source_count * 4;
+	page->more[1] = pa + 128;
+	page->more[2] = destination_count * sizeof(page->destinations[0]);
+	page->more[3] = 0;
+	for (vm_offset_t line = memory; line < memory + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	result = scm("to assign memory", SCM_MP_ASSIGN, SCM_ASSIGN_ARGUMENTS, pa, 16, pa + 64, pa + 240, &answer);
+	kmem_free(kernel_map, memory, PAGE_SIZE);
+	if (result != 0) {
+		return result < 0 ? result : -result;
+	}
+	return answer == 0 ? 0 : -1000 - (int)(answer & 0xffff);
 }
 
 /* A TLV of a QMI message: its value and length, or NULL. */
@@ -4556,7 +4805,13 @@ jsn_string(const char *from, const char *end, const char *key, char *out, size_t
 static void
 servreg_load(void)
 {
-	static const char *const files[] = { "modemr.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn", "cdspr.jsn", "wpssr.jsn" };
+	/*
+	 * modemuw.jsn: the modem's user domain for the WLAN (msm/modem/wlan_pd: kernel/elf_loader, wlan/fw), where the SDM845's
+	 * and the SM7150's Wi-Fi firmware runs. Without it the SM7150's modem asked for "kernel/elf_loader" and was told of no
+	 * domain (surya, 3 November 2026), and its Wi-Fi's service never came. A file that is not there is passed over.
+	 */
+	static const char *const files[] = { "modemr.jsn", "modemuw.jsn", "adspr.jsn", "adsps.jsn", "adspua.jsn", "battmgr.jsn",
+		"cdspr.jsn", "wpssr.jsn", "slpir.jsn", "slpius.jsn" };
 
 	servreg_maps = 0;
 	for (unsigned f = 0; f < sizeof(files) / sizeof(files[0]); f++) {
@@ -4969,6 +5224,15 @@ ipa_qmi_start(void)
 	if (option("modem_no_ipa_qmi")) {
 		return false;
 	}
+	/*
+	 * Not on the SM7150 unless modem_ipa_qmi=1: its IPA (v4.2) has no hashed tables, and the SC7280's "initialize your
+	 * driver" with them killed its modem (3 November 2026: "ipa_qmi_server.c:418: IPA Assert: (init_req->
+	 * v4_hash_route_tbl_info_valid == 0) && ... failed"); no IPA runs there anyway.
+	 */
+	if (sm7150 && !option("modem_ipa_qmi")) {
+		printf("mpss: ipa: the SM7150's modem is not spoken to about the IPA (modem_ipa_qmi=1 would)\n");
+		return false;
+	}
 	if (ipa_host_port == NULL) {
 		ipa_host_port = qrtr_open(ipa_host_receive, NULL, NULL);
 	}
@@ -5005,6 +5269,18 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the modem has put into its own");
+	/*
+	 * Our queue (item 479), where the SC7280's modem has made it and the SM7150's has not (seen on surya, 3 November
+	 * 2026, as with its audio DSP: hakios.adsp.c): Linux's glink_smem allocates it itself, 16 KB; made so here.
+	 */
+	if (!glink_find() && glink.descriptor != 0 && glink.theirs != 0 && glink.ours == 0) {
+		uint32_t cacheline = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_MPSS, &cacheline, &size);
+
+		printf("mpss: %u: our queue (item 479) is not there: it is made, 16384 bytes, as Linux makes it\n", step);
+		if (partition == 0 || !our_item_make(partition, 479, 16384)) {
+			return false;
+		}
+	}
 	if (!glink_find()) {
 		printf("mpss: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);
@@ -6326,9 +6602,16 @@ soc_override(void)
 			said++;
 		}
 	}
+	if (PE_parse_boot_argn("modem_sm7150", &sm7150, sizeof(sm7150)) && sm7150) {
+		mpss_memory = 0x8b000000u;              /* surya: reserved-memory modem_region@8b000000 */
+		mpss_memory_size = 0x08400000u;
+		printf("mpss: the SM7150's modem (modem_sm7150=1): its memory at %#x (%#x bytes), doorbells through the APCS\n",
+		    mpss_memory, mpss_memory_size);
+	}
 	PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
 	PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));
 	PE_parse_boot_argn("soc_mpss_mem", &mpss_memory, sizeof(mpss_memory));
+	PE_parse_boot_argn("soc_mpss_size", &mpss_memory_size, sizeof(mpss_memory_size));
 	PE_parse_boot_argn("soc_imem", &ipa_imem, sizeof(ipa_imem));
 	PE_parse_boot_argn("soc_ipa_stream", &ipa_stream, sizeof(ipa_stream));
 	PE_parse_boot_argn("soc_ipa_stream_uc", &ipa_stream_uc, sizeof(ipa_stream_uc));

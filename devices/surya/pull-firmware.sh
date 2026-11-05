@@ -51,6 +51,19 @@ pull fw-audio $img/adsp.mdt $(for i in $(seq -w 0 40); do echo $img/adsp.b$i; do
 pull fw-modem $img/modem.mdt $(for i in $(seq -w 0 40); do echo $img/modem.b$i; done)
 # (the Wi-Fi's board data, beside the modem's image: for the day the WCN3990 has a driver)
 pull fw-wifi $img/bdwlan.bin $img/bdwlan.b0b $img/bdwlan.b0c $img/bdwlan.b0d $img/bdwlan.b0e $img/bdwlan.b0f
+# The rest of the partition's image/, which the modem reads over TFTP once it runs (drivers/modem/hakios.mpss.c): the service
+# registry's *.jsn (its Wi-Fi's domain among them), the WLAN firmware wlanmdsp.mbn, the carrier configurations (modem_pr/).
+# userland/build.sh puts fw-modem/image into the system image's /fw/image. The other processors' images are left out (the
+# modem's are fw-modem/ itself, the audio DSP's fw-audio/): 20 MB rather than 150.
+rm -rf fw-modem/image
+if adb pull "$img" fw-modem/ >/dev/null 2>&1 && [ -d fw-modem/image ]; then
+	rm -f fw-modem/image/adsp.* fw-modem/image/cdsp.* fw-modem/image/venus.* fw-modem/image/npu.* fw-modem/image/modem.* \
+		fw-modem/image/a615_zap.* fw-modem/image/ipa_fws.* fw-modem/image/cmnlib* fw-modem/image/widevine.* fw-modem/image/*.b[0-9][0-9]
+	echo "pull-firmware.sh: fw-modem/image: $(find fw-modem/image -type f | wc -l | tr -d ' ') files ($(du -sh fw-modem/image | cut -f1)); \
+wlanmdsp.mbn $( [ -f fw-modem/image/wlanmdsp.mbn ] && echo there || echo NOT THERE), $(ls fw-modem/image/*.jsn 2>/dev/null | wc -l | tr -d ' ') .jsn"
+else
+	echo "pull-firmware.sh: $img could not be pulled whole"
+fi
 [ -z "$mounted" ] || adb shell "umount /tmp/hakios-fw; rmdir /tmp/hakios-fw" 2>/dev/null || true
 for f in novatek_ts_tianma_fw.bin novatek_ts_huaxing_fw.bin; do
 	adb pull "/vendor/firmware/$f" fw-touch/ >/dev/null 2>&1 || echo "pull-firmware.sh: /vendor/firmware/$f: not on the phone"
