@@ -629,22 +629,37 @@ copy_engines(void)
 			delay_for_interval(wait_ms, NSEC_PER_MSEC);
 		}
 	}
-	wlan = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE, WLAN_MEMBASE_SIZE);
-	if (wlan == NULL) {
-		say("wcn3990: 11: the WLAN's registers cannot be mapped\n");
-		return;
-	}
 	{
-		/* wcn3990_peek=OFS: one word of the WLAN's 8 MB read first, to tell the region from the copy engines in it */
+		/* wcn3990_peek=OFS: one word of the WLAN's 8 MB read first, through a page of its own, to tell the region from the
+		 * copy engines in it */
 		uint32_t peek = ~0u;
 
 		if (PE_parse_boot_argn("wcn3990_peek", &peek, sizeof(peek)) && peek < WLAN_MEMBASE_SIZE) {
+			volatile uint8_t *page;
+
 			peek &= ~3u;
-			say("wcn3990: 11: about to read one word of the WLAN's region at %#llx (+%#x)\n", WLAN_MEMBASE + peek, peek);
+			say("wcn3990: 11: about to map the WLAN's page at %#llx\n", WLAN_MEMBASE + (peek & ~0xfffu));
+			page = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE + (peek & ~0xfffu), 0x1000);
+			say("wcn3990: 11: mapped; about to read one word of it at %#llx (+%#x)\n", WLAN_MEMBASE + peek, peek);
 			delay_for_interval(1500, NSEC_PER_MSEC);
-			say("wcn3990: 11: it reads %#x\n", wl_rd(peek));
+			say("wcn3990: 11: it reads %#x\n", *(volatile uint32_t *)(page + (peek & 0xfff)));
 		}
 	}
+	/*
+	 * Only the copy engines' 64 KB (CE0 at +0x240000 to the wrapper's +0x24c000) is mapped, not the WLAN's 8 MB: `wlan` is
+	 * where +0 would be, and every offset used is in that window.
+	 */
+	say("wcn3990: 11: about to map the copy engines' registers (64 KB at %#llx)\n", WLAN_MEMBASE + CE_BASE(0));
+	{
+		volatile uint8_t *window = (volatile uint8_t *)ml_io_map(WLAN_MEMBASE + CE_BASE(0), 0x10000);
+
+		if (window == NULL) {
+			say("wcn3990: 11: the WLAN's registers cannot be mapped\n");
+			return;
+		}
+		wlan = window - CE_BASE(0);
+	}
+	say("wcn3990: 11: mapped\n");
 	say("wcn3990: 11: about to read the WLAN's copy engine registers at %#llx (CE1's control and size)\n", WLAN_MEMBASE);
 	delay_for_interval(1500, NSEC_PER_MSEC);
 	say("wcn3990: 11: the WLAN's registers answer: CE1 ctrl1 %#x, dst size %#x\n", wl_rd(CE_BASE(1) + CE_CTRL1),
