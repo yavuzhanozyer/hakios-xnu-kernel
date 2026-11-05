@@ -23,6 +23,10 @@
  *  11  (wcn3990=3) the copy engines: the WLAN's stream through the SMMU, three engines' rings, buffers to receive into,
  *      and the firmware's first HTC message ("ready") watched for (see copy_engines())
  *
+ * Seen on the phone (5 November 2026, wcn3990=4): HTC's "ready" on CE2 (2 credits of 2184 bytes); WMI's control service
+ * connected (endpoint 1, messages of up to 2040 bytes); after the setup, WMI's service available (3), SERVICE READY (1, 332
+ * bytes, the firmware's version in it), and events 0x4009 and 0x4022.
+ *
  * Seen on the phone (3 November 2026): every request answered with success, the MSA memory in two regions (16 KB secure at
  * 0x97500000, the rest not) given by TrustZone, chip id 0x30214 (family 0x4001), no board id (so bdwlan.bin, 26 KB, in 5
  * pieces), firmware WLAN.HL.3.2.2-00650 of 15 August 2021, and "firmware ready" 3.9 s after the exchange began.
@@ -693,15 +697,16 @@ htc_wmi(void)
 	if (!htc_send(0, complete, sizeof(complete))) {
 		return;
 	}
-	/* the firmware's first WMI events: the service ready (WMI_TLV_SERVICE_READY_EVENTID 0x4001), then perhaps more */
+	/* the firmware's first WMI events: service available (3), service ready (1), then perhaps more (seen: 0x4009, 0x4022) */
 	while (events < 6 && ce_receive(events == 0 ? 10000 : 2000)) {
 		events++;
 		show_htc(rx_ce, rx_data, rx_length);
 		if (rx_data[0] == wmi && rx_length >= 12) {
 			unsigned id = (rx_data[8] | rx_data[9] << 8 | rx_data[10] << 16 | rx_data[11] << 24) & 0xffffff;
 
-			say("wcn3990: 12: A WMI EVENT on endpoint %u: id %#x%s, %u bytes\n", wmi, id, id == 0x4001 ? " (SERVICE READY)" :
-			    id == 0x4002 ? " (READY)" : "", rx_length - 8);
+			/* (WMI-TLV's numbers, ath10k's wmi-tlv.h: the start group's events are 1, 2, 3) */
+			say("wcn3990: 12: A WMI EVENT on endpoint %u: id %#x%s, %u bytes\n", wmi, id, id == 0x1 ? " (SERVICE READY)" :
+			    id == 0x2 ? " (READY)" : id == 0x3 ? " (SERVICE AVAILABLE)" : "", rx_length - 8);
 		}
 	}
 	say("wcn3990: 12: %u messages after the setup%s\n", events, events ? "" : ": THE FIRMWARE SAID NOTHING ON WMI");
