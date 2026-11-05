@@ -579,10 +579,11 @@ ce_destination(unsigned ce, uint64_t ring, uint32_t entries)
 #define CE3_RING                  0x4000u       /* CE3's source ring, 32 entries */
 #define CE3_TX_BUFFERS            0x60000u      /* CE3's: 32 of 2 KB */
 
+#define RX_RINGS                  7
 static struct {
 	unsigned ce;
 	uint32_t entries, ring_at, buffers_at, read, write;
-} rx[2];
+} rx[RX_RINGS];
 static uint32_t tx_write, tx3_write;
 static unsigned htt_endpoint = 0xff;
 static volatile uint8_t *shadow;
@@ -595,7 +596,7 @@ ce_receive(uint32_t ms)
 	uint64_t began = now_ms();
 
 	do {
-		for (unsigned r = 0; r < 2; r++) {
+		for (unsigned r = 0; r < RX_RINGS; r++) {
 			volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + rx[r].ring_at);
 			uint32_t e = rx[r].read;
 
@@ -1243,8 +1244,13 @@ rails_on(void)
 static void
 copy_engines(uint32_t level)
 {
-	static const struct { unsigned ce; uint32_t entries; uint32_t ring_at, buffers_at; } in[2] = {
-		{ 1, 32, 0x2000, 0x10000 }, { 2, 64, 0x3000, 0x20000 },
+	/*
+	 * every destination engine ath10k posts buffers to (ath10k_snoc_rx_post(): CE1, CE2, CE5, CE9, CE10, CE11; and CE8, the
+	 * target's to the uMC), 32 entries each here: a firmware with nowhere to put what it sends may hold everything else up
+	 */
+	static const struct { unsigned ce; uint32_t entries; uint32_t ring_at, buffers_at; } in[RX_RINGS] = {
+		{ 1, 32, 0x2000, 0x10000 }, { 2, 64, 0x3000, 0x20000 }, { 5, 32, 0x6000, 0x80000 }, { 8, 32, 0x7000, 0x90000 },
+		{ 9, 32, 0x8000, 0xa0000 }, { 10, 32, 0x9000, 0xb0000 }, { 11, 32, 0xa000, 0xc0000 },
 	};
 	uint32_t seconds = 10, seen = 0;
 	uint64_t began;
@@ -1331,8 +1337,9 @@ copy_engines(uint32_t level)
 	/* CE0: the source ring for HTC's control, CE3 the one for WMI's, 32 entries of at most 2048 bytes each */
 	ce_source(0, CE_DMA_PHYS + 0x1000, 32, CE_BUFFER);
 	ce_source(3, CE_DMA_PHYS + CE3_RING, 32, CE_BUFFER);
+	ce_source(4, CE_DMA_PHYS + 0x5000, 32, 256);           /* (HTT's out, nothing sent on it yet) */
 	/* CE1, CE2: destination rings, every entry but one given a buffer (ath10k_snoc_rx_post()) */
-	for (unsigned r = 0; r < 2; r++) {
+	for (unsigned r = 0; r < RX_RINGS; r++) {
 		volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + in[r].ring_at);
 
 		ce_destination(in[r].ce, CE_DMA_PHYS + in[r].ring_at, in[r].entries);
@@ -1346,7 +1353,7 @@ copy_engines(uint32_t level)
 	}
 	say("wcn3990: 11: CE0 a source ring of 32, CE1 and CE2 destination rings of 32 and 64 with buffers posted; read indices in "
 	    "our memory at %#llx; watching for %u s\n", CE_DMA_PHYS, seconds);
-	for (unsigned r = 0; r < 2; r++) {
+	for (unsigned r = 0; r < RX_RINGS; r++) {
 		rx[r].ce = in[r].ce;
 		rx[r].entries = in[r].entries;
 		rx[r].ring_at = in[r].ring_at;
