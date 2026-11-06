@@ -764,6 +764,11 @@ htc_credits(const uint8_t *m, unsigned length)
 #define TAG_SCAN_CHAN_LIST_CMD  79
 #define TAG_CHANNEL             80
 #define TAG_VDEV_CREATE_CMD     86
+#define TAG_HAL_REG_CAPABILITIES 33
+#define TAG_CHAN_INFO_EVENT     38
+#define TAG_PDEV_SET_REGDOMAIN  81
+#define WMI_PDEV_SET_REGDOMAIN_CMD 0x4001
+#define WMI_CHAN_INFO_EVENT     0x4002
 #define WMI_ABI_VER0            0x01000000u
 #define WMI_ABI_VER1            53
 #define WMI_ABI_NS0             0x5f414351u
@@ -885,7 +890,7 @@ static struct {
 	uint16_t mhz;
 	int snr;
 } seen_bss[48];
-static unsigned seen_count;
+static unsigned seen_count, chan_infos, scan_events;
 
 /* A beacon or probe response from the firmware's management rx event: the network it tells of, noted once. */
 static void
@@ -1049,6 +1054,23 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 		    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 	}
 
+	/*
+	 * the regulatory domain, as ath10k_regd_update() gives it after the init: the EEPROM's own (the service ready's HAL
+	 * register capabilities), for both bands, the conformance limits ETSI's (0x30, which Turkey's are)
+	 */
+	{
+		unsigned caps_length = 0;
+		const uint8_t *caps = wmi_find(ready, length, TAG_HAL_REG_CAPABILITIES, &caps_length);
+		uint32_t rd = caps != NULL && caps_length >= 4 ? r32(caps) : 0;
+
+		say("wcn3990: 13: the EEPROM's regulatory domain %#x (%s)\n", rd, caps != NULL ? "from the service ready" : "not given");
+		wmi_at = 4;
+		wtlv(TAG_PDEV_SET_REGDOMAIN, 24);
+		w32(0); w32(rd); w32(rd); w32(rd); w32(0x30); w32(0x30);
+		if (!wmi_send(wmi, WMI_PDEV_SET_REGDOMAIN_CMD, "the regulatory domain")) {
+			return;
+		}
+	}
 	/* a station's vdev (0), the channels, a scan on it (ath10k_wmi_start_scan_init()'s values) */
 	wmi_at = 4;
 	wtlv(TAG_VDEV_CREATE_CMD, 20);
@@ -1094,16 +1116,27 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 		return;
 	}
 	say("wcn3990: 14: SCANNING for %u s\n", seconds);
+	chan_infos = scan_events = 0;
 	began = now_ms();
 	while (now_ms() - began < seconds * 1000ull) {
 		id = wmi_event(wmi, 1000, &body, &body_length);
 		if (id == WMI_MGMT_RX_EVENT) {
 			note_frame(body, body_length);
+		} else if (id == WMI_CHAN_INFO_EVENT) {
+			event = wmi_find(body, body_length, TAG_CHAN_INFO_EVENT, &event_length);
+			if (event != NULL && event_length >= 24 && chan_infos++ < 80) {
+				say("wcn3990: 14:   channel %u MHz: flags %#x, noise %d, rx frames %u\n", r32(event + 4), r32(event + 8),
+				    (int)r32(event + 12), event_length >= 36 ? r32(event + 32) : 0);
+			}
 		} else if (id == WMI_SCAN_EVENT) {
 			event = wmi_find(body, body_length, TAG_SCAN_EVENT, &event_length);
 			if (event != NULL && event_length >= 8) {
 				uint32_t type = r32(event);
 
+				if (scan_events++ < 12) {
+					say("wcn3990: 14:   scan event %#x, reason %u, %u MHz\n", type, r32(event + 4),
+					    event_length >= 12 ? r32(event + 8) : 0);
+				}
 				if (type & 0x3 || type & 0x40) {
 					say("wcn3990: 14: +%llu ms: the scan %s (reason %u)\n", now_ms() - began, type & 0x1 ? "has started" :
 					    type & 0x2 ? "HAS COMPLETED" : "FAILED TO START", r32(event + 4));
