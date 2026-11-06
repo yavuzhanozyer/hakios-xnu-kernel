@@ -1464,6 +1464,17 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	}
 	say("wcn3990: 14: the HTT ring: %u buffers filled by the firmware, %u HTT messages\n", htt_rx_done, htt_messages);
 	say("wcn3990: 14: THE SCAN FOUND %u NETWORKS\n", seen_count);
+	{
+		/*
+		 * the SMMU after the scan: a global fault with an unknown stream (GFSR's USF, bit 1; GFSYNR1's low 16 bits the
+		 * stream) would be the radio's own DMA going through a stream we do not let through (ours: 0x240/0x1)
+		 */
+		vm_offset_t smmu = ml_io_map(SMMU_PHYS, 0x2000), banks = ml_io_map(SMMU_PHYS + 0x80000 + 0x1000 * 60, 0x1000);
+
+		say("wcn3990: 14: SMMU after the scan: global fault %#x, syndrome %#x %#x, address %#x%08x; context bank 60 fault %#x\n",
+		    *(volatile uint32_t *)(smmu + 0x48), *(volatile uint32_t *)(smmu + 0x50), *(volatile uint32_t *)(smmu + 0x54),
+		    *(volatile uint32_t *)(smmu + 0x44), *(volatile uint32_t *)(smmu + 0x40), *(volatile uint32_t *)(banks + 0x58));
+	}
 }
 
 /* ath10k_htc_connect_service() for WMI's control, ath10k_htc_start(), and what the firmware says on WMI's endpoint */
