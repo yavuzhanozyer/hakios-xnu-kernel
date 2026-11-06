@@ -770,6 +770,8 @@ htc_credits(const uint8_t *m, unsigned length)
 #define TAG_CHAN_INFO_EVENT     38
 #define TAG_PDEV_SET_REGDOMAIN  81
 #define WMI_PDEV_SET_REGDOMAIN_CMD 0x4001
+#define TAG_PDEV_SET_PARAM      82
+#define WMI_PDEV_SET_PARAM_CMD  0x4003
 #define WMI_CHAN_INFO_EVENT     0x4002
 #define WMI_ABI_VER0            0x01000000u
 #define WMI_ABI_VER1            53
@@ -1091,9 +1093,12 @@ htt_setup(unsigned wmi)
 	uint64_t began;
 	const uint8_t *body;
 	unsigned body_length;
-	uint32_t level = 3;
+	uint32_t level = 1;
 
-	/* wcn3990_htt=N: 0 no HTT set up, 1 the version only, 2 and the receive ring, 3 and the aggregation limits (default) */
+	/*
+	 * wcn3990_htt=N: 0 no HTT set up, 1 the version only (default), 2 and the receive ring, 3 and the aggregation limits.
+	 * (With the ring given, 6 November 2026, the phone hung during the scan, three times: not until that is understood.)
+	 */
 	PE_parse_boot_argn("wcn3990_htt", &level, sizeof(level));
 	say("wcn3990: 13: HTT: set up to level %u (wcn3990_htt)\n", level);
 	if (level == 0) {
@@ -1303,6 +1308,25 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 		w32(0); w32(rd); w32(rd); w32(rd); w32(0x30); w32(0x30);
 		if (!wmi_send(wmi, WMI_PDEV_SET_REGDOMAIN_CMD, "the regulatory domain")) {
 			return;
+		}
+	}
+	/*
+	 * the antennas' chains, as ath10k_start() sets them before anything is scanned (__ath10k_set_antenna(): the tx and rx
+	 * chain masks, WMI_TLV_PDEV_PARAM_TX_CHAIN_MASK 1 and _RX_CHAIN_MASK 2, both chains of the two the service ready gives).
+	 * Without them (6 November 2026) the scan went over every channel with a noise floor of -117 dBm on 2.4 GHz -- no
+	 * receiver behind it -- and heard no network. wcn3990_chains=M: another mask (0: not set).
+	 */
+	{
+		uint32_t chains = 0x3;
+
+		PE_parse_boot_argn("wcn3990_chains", &chains, sizeof(chains));
+		for (uint32_t param = 1; chains != 0 && param <= 2; param++) {
+			wmi_at = 4;
+			wtlv(TAG_PDEV_SET_PARAM, 12);
+			w32(0); w32(param); w32(chains);
+			if (!wmi_send(wmi, WMI_PDEV_SET_PARAM_CMD, param == 1 ? "the tx chain mask" : "the rx chain mask")) {
+				return;
+			}
 		}
 	}
 	/* a station's vdev (0), the channels, a scan on it (ath10k_wmi_start_scan_init()'s values) */
