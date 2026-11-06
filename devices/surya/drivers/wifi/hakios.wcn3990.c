@@ -1091,7 +1091,14 @@ htt_setup(unsigned wmi)
 	uint64_t began;
 	const uint8_t *body;
 	unsigned body_length;
+	uint32_t level = 3;
 
+	/* wcn3990_htt=N: 0 no HTT set up, 1 the version only, 2 and the receive ring, 3 and the aggregation limits (default) */
+	PE_parse_boot_argn("wcn3990_htt", &level, sizeof(level));
+	say("wcn3990: 13: HTT: set up to level %u (wcn3990_htt)\n", level);
+	if (level == 0) {
+		return;
+	}
 	{
 		static const uint8_t version[4] = { 0 };          /* HTT_H2T_MSG_TYPE_VERSION_REQ */
 
@@ -1106,6 +1113,9 @@ htt_setup(unsigned wmi)
 	}
 	say("wcn3990: 13: HTT: %s\n", htt_messages ? "the firmware answered (its version: the CE1 message above)" :
 	    "NO ANSWER to the version request within 500 ms");
+	if (level < 2) {
+		return;
+	}
 
 	for (uint32_t i = 0; i < HTT_RX_RING_ENTRIES; i++) {
 		volatile uint8_t *b = dma + HTT_RX_BUFS_AT + (uint64_t)(i % HTT_RX_BUFFERS) * HTT_RX_BUF;
@@ -1146,6 +1156,9 @@ htt_setup(unsigned wmi)
 		    HTT_RX_RING_ENTRIES, base, HTT_RX_FILL, HTT_RX_BUF, idx);
 		(void)htt_send(m, at, "the receive ring");
 		htt_rx = dma;           /* (polled from now on) */
+	}
+	if (level < 3) {
+		return;
 	}
 	{
 		static const uint8_t aggregation[4] = { 5, 64, 3, 0 };    /* HTT_H2T_MSG_TYPE_AGGR_CFG: 64 a-mpdu, 3 a-msdu */
