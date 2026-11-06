@@ -1097,7 +1097,13 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	}
 	wmi_at = 4;
 	wtlv(TAG_START_SCAN_CMD, 15 * 4 + 6 * 4 + 16);
-	w32(1); w32(1); w32(0); w32(1);                         /* scan 1, requester 1, vdev 0, priority low */
+	/*
+	 * the scan's and the requester's ids with the host's prefix, 0xA000, as ath10k_wmi_put_start_scan_common() puts them
+	 * (WMI_HOST_SCAN_REQ_ID_PREFIX, WMI_HOST_SCAN_REQUESTOR_ID_PREFIX): the firmware sends a scan's events and what it
+	 * hears to the host only for those. Without it (6 November 2026) the scan ran over every channel, the radio heard
+	 * hundreds of thousands of frames, and nothing of it came up. Scan 0 (ATH10K_SCAN_ID), requester 1, vdev 0, low.
+	 */
+	w32(0xa000 | 0); w32(0xa000 | 1); w32(0); w32(1);
 	w32(0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x100);              /* started, completed, bss/foreign channel, dequeued, exit */
 	w32(50); w32(150); w32(50); w32(500); w32(0); w32(0); w32(0); w32(20000); w32(5);
 	w32((0x4 | 0x8 | 0x10) ^ 0x20);                         /* cck, ofdm rates, channel stats; probe filter inverted (ath10k) */
