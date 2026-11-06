@@ -1003,6 +1003,51 @@ note_80211(const uint8_t *frame, unsigned frame_length, unsigned mhz, int snr, c
 #define HTT_TX4_BUFFERS         0xd0000u        /* CE4's: 32 of 256 bytes, in our CE memory */
 #define CE_SHADOW_SR_WR_INDEX_CE4 0x00032010u
 
+/*
+ * The firmware's own regulatory (Qualcomm's "regulatory offload", which ath10k does not know): WMI_REG_CHAN_LIST_CC_EVENTID
+ * (0x3a001), what country it holds and the rules it scans by; and WMI_SET_CURRENT_COUNTRY_CMDID (0x3a001), the country
+ * the host gives it, as Android's driver does. Their layouts: Qualcomm's fw-api (wmi_unified.h, wmi_tlv_defs.h) of
+ * Xiaomi's SM6150 kernel: wmi_reg_chan_list_cc_event_fixed_param (tag 609), wmi_regulatory_rule_struct (608),
+ * wmi_set_current_country_cmd_fixed_param (607).
+ */
+#define WMI_REG_CHAN_LIST_CC_EVENT      0x3a001
+#define WMI_SET_CURRENT_COUNTRY_CMD     0x3a001
+#define TAG_REG_CHAN_LIST_CC_EVENT      609
+#define TAG_REGULATORY_RULE             608
+#define TAG_SET_CURRENT_COUNTRY         607
+
+static void
+regulatory_event(const uint8_t *body, unsigned length)
+{
+	unsigned l = 0, at = 0, rules = 0;
+	const uint8_t *e = wmi_find(body, length, TAG_REG_CHAN_LIST_CC_EVENT, &l);
+
+	if (e == NULL || l < 56) {
+		say("wcn3990: 13: the firmware's regulatory: %u bytes, not read\n", length);
+		return;
+	}
+	say("wcn3990: 13: THE FIRMWARE'S REGULATORY: status %u, country \"%c%c\" (id %u, domain %#x), dfs region %u, phy bitmap %#x, "
+	    "bandwidth 2.4 GHz %u-%u, 5 GHz %u-%u MHz, %u rules for 2.4 GHz, %u for 5 GHz\n", r32(e), e[8] ? e[8] : '?',
+	    e[9] ? e[9] : '?', r32(e + 16), r32(e + 20), r32(e + 24), r32(e + 28), r32(e + 32), r32(e + 36), r32(e + 40),
+	    r32(e + 44), r32(e + 48), r32(e + 52));
+	while (at + 4 <= length && rules < 16) {
+		uint32_t header = r32(body + at), size = header & 0xffff, tag = header >> 16;
+
+		if (tag == TAG_REGULATORY_RULE && size >= 12 && at + 4 + size <= length) {
+			const uint8_t *r = body + at + 4;
+
+			say("wcn3990: 13:   rule: %u-%u MHz, up to %u MHz wide, %u dBm, flags %#x\n", r32(r) & 0xffff, r32(r) >> 16,
+			    r32(r + 4) & 0xffff, (r32(r + 4) >> 16) & 0xff, r32(r + 8));
+			rules++;
+			at += 4 + size;
+		} else if (tag == 18 || tag == 19) {            /* (the arrays the rules are in: their contents read as TLVs) */
+			at += 4;
+		} else {
+			at += 4 + size;
+		}
+	}
+}
+
 static volatile uint8_t *htt_rx;
 static uint32_t htt_rx_read, htt_rx_alloc, htt_rx_done, tx4_write;
 
@@ -1316,6 +1361,9 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	began = now_ms();
 	while ((id = wmi_event(wmi, 5000, &body, &body_length)) != 0 && id != WMI_READY_EVENT) {
 		say("wcn3990: 13:   (event %#x while waiting for ready)\n", id);
+		if (id == WMI_REG_CHAN_LIST_CC_EVENT) {
+			regulatory_event(body, body_length);
+		}
 	}
 	if (id != WMI_READY_EVENT) {
 		say("wcn3990: 13: NO WMI READY within 5 s of the init\n");
@@ -1338,6 +1386,32 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 	}
 
 	htt_setup(wmi);
+
+	{
+		/* the country, as Android's driver gives it (wcn3990_country=XX; default TR), and what the firmware answers with */
+		char country[4] = "TR";
+		uint64_t asked;
+
+		PE_parse_boot_argn("wcn3990_country", country, sizeof(country));
+		wmi_at = 4;
+		wtlv(TAG_SET_CURRENT_COUNTRY, 8);
+		w32(0); w32((uint8_t)country[0] | (uint32_t)(uint8_t)country[1] << 8);
+		if (wmi_send(wmi, WMI_SET_CURRENT_COUNTRY_CMD, "the country")) {
+			asked = now_ms();
+			while (now_ms() - asked < 2000) {
+				id = wmi_event(wmi, 2000 - (uint32_t)(now_ms() - asked), &body, &body_length);
+				if (id == 0) {
+					say("wcn3990: 13: no regulatory answer to the country \"%s\" within 2 s\n", country);
+					break;
+				}
+				if (id == WMI_REG_CHAN_LIST_CC_EVENT) {
+					regulatory_event(body, body_length);
+					break;
+				}
+				say("wcn3990: 13:   (event %#x after the country)\n", id);
+			}
+		}
+	}
 
 	/*
 	 * the regulatory domain, as ath10k_regd_update() gives it after the init: the EEPROM's own (the service ready's HAL
