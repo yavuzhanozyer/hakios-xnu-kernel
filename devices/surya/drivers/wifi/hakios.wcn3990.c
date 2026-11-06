@@ -1842,6 +1842,24 @@ exchange(void)
 	if (level >= 2 && mission() && level >= 3) {
 		copy_engines(level);
 	}
+	if (in_mission) {
+		/*
+		 * ath10k_qmi_wlan_disable(): the mode "off" before anything else goes down. With HTT's receive ring given, the WLAN
+		 * writes into our memory on its own; left running while the modem was shut down under it (6 November 2026, twice)
+		 * the kernel never came back to the loader.
+		 */
+		struct wlfw_wlan_mode_req_msg_v01 off;
+		struct wlfw_wlan_mode_resp_msg_v01 off_reply;
+
+		bzero(&off, sizeof(off));
+		bzero(&off_reply, sizeof(off_reply));
+		off.mode = QMI_WLFW_OFF_V01;
+		if (ask("15: the mode: off", QMI_WLFW_WLAN_MODE_REQ_V01, WLFW_WLAN_MODE_REQ_MSG_V01_MAX_MSG_LEN,
+		    wlfw_wlan_mode_req_msg_v01_ei, &off, wlfw_wlan_mode_resp_msg_v01_ei, &off_reply, 0, false)) {
+			say("wcn3990: 15: the firmware's mode is off: the radio stopped, nothing more written to our memory\n");
+			in_mission = false;
+		}
+	}
 out:
 	say("wcn3990: the exchange ends %llu ms after it began: \"MSA ready\" %s, \"FIRMWARE READY\" %s, mission mode %s\n",
 	    now_ms() - wlfw.began, wlfw.msa_ready ? "yes" : "no", wlfw.fw_ready ? "YES" : "no", in_mission ? "YES" : "no");
