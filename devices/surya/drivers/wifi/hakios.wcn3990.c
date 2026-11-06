@@ -775,7 +775,10 @@ htc_credits(const uint8_t *m, unsigned length)
 #define WMI_ABI_VER1            53
 #define WMI_ABI_NS0             0x5f414351u
 #define WMI_ABI_NS1             0x00004c4du
-#define HOST_MEMORY_PHYS        0x93c00000ull   /* what the firmware asks for at its service ready: after our CE memory */
+/* (what the firmware asks for at its service ready: after our CE memory. NB: 0x93c00000 is also where the audio DSP's
+ * image runs when sound is on; the WCN3990's firmware has asked for nothing so far -- 0 memory requests -- so nothing
+ * is written there. If it ever asks, this has to move.) */
+#define HOST_MEMORY_PHYS        0x93c00000ull
 #define HOST_MEMORY_SIZE        0x01a00000u
 
 static uint8_t wmi_out[CE_BUFFER];
@@ -960,19 +963,27 @@ note_80211(const uint8_t *frame, unsigned frame_length, unsigned mhz, int snr, c
 /*
  * HTT, the data path's own protocol (endpoint 1; out through CE4, in through CE1), set up as ath10k_htt_setup() does it
  * right after WMI's ready: the version asked for, then the receive ring -- ath10k_htt_send_rx_ring_cfg_64(): a ring of
- * 2048 64-bit buffer addresses and the index of the last one given (alloc_idx), which the firmware reads from our
- * memory; 1023 given (HTT_RX_RING_FILL_LEVEL), every frame kind asked for, and where in a buffer each part of the WCN3990's
+ * 64-bit buffer addresses and the index of the last one given (alloc_idx), which the firmware reads from our memory
+ * (ath10k: 2048, 1023 given; here 128, 63 given, below), every frame kind asked for, and where in a buffer each part of the WCN3990's
  * descriptor goes (ath10k_rx_desc_wcn3990_get_offsets(), struct htt_rx_desc_v2: offsets in 4-byte words). Without a ring
  * the radio has nowhere to put what it hears: the scan of 6 November 2026 heard hundreds of thousands of frames and
  * gave nothing up. A buffer is the firmware's done when its attention word has MSDU_DONE (bit 31); it is looked at
  * (a beacon or a probe response in it: a network), cleared, and given back, the ring kept 1023 ahead.
  */
-#define HTT_RX_RING_ENTRIES     2048u
-#define HTT_RX_FILL             1023u
+/*
+ * In our own CE memory, nowhere else: the first try (6 November 2026) put it in the "host memory" after it, 0x95100000,
+ * and that is the audio DSP's running image (linked at 0x93c00000): zeroed under it, the phone hung. A ring of 128
+ * (HTT_RX_RING_SIZE_MIN) at 0xb000, its index at 0xc000, 64 buffers of 2 KB at 0xe0000-0x100000: slot i has buffer i % 64,
+ * and with at most 63 given at a time no two given slots share one.
+ */
+#define HTT_RX_RING_ENTRIES     128u
+#define HTT_RX_FILL             63u
+#define HTT_RX_BUFFERS          64u
 #define HTT_RX_BUF              2048u
-#define HTT_RX_PHYS             (HOST_MEMORY_PHYS + HOST_MEMORY_SIZE - 0x500000u)  /* the ring, alloc_idx, then 4 MB of buffers */
-#define HTT_RX_IDX_AT           0x4000u
-#define HTT_RX_BUFS_AT          0x10000u
+#define HTT_RX_PHYS             CE_DMA_PHYS
+#define HTT_RX_RING_AT          0xb000u
+#define HTT_RX_IDX_AT           0xc000u
+#define HTT_RX_BUFS_AT          0xe0000u
 #define HTT_TX4_BUFFERS         0xd0000u        /* CE4's: 32 of 256 bytes, in our CE memory */
 #define CE_SHADOW_SR_WR_INDEX_CE4 0x00032010u
 
@@ -1037,7 +1048,7 @@ htt_rx_poll(void)
 		return;
 	}
 	for (unsigned n = 0; n < 64; n++) {
-		volatile uint8_t *b = htt_rx + HTT_RX_BUFS_AT + (uint64_t)htt_rx_read * HTT_RX_BUF;
+		volatile uint8_t *b = htt_rx + HTT_RX_BUFS_AT + (uint64_t)(htt_rx_read % HTT_RX_BUFFERS) * HTT_RX_BUF;
 		uint32_t attention = *(volatile uint32_t *)(b + 1 * 4), msdu = *(volatile uint32_t *)(b + 7 * 4) & 0x3fff;
 		unsigned length;
 
@@ -1096,26 +1107,21 @@ htt_setup(unsigned wmi)
 	say("wcn3990: 13: HTT: %s\n", htt_messages ? "the firmware answered (its version: the CE1 message above)" :
 	    "NO ANSWER to the version request within 500 ms");
 
-	htt_rx = (volatile uint8_t *)ml_io_map_unmappable(HTT_RX_PHYS, HTT_RX_BUFS_AT + HTT_RX_RING_ENTRIES * HTT_RX_BUF,
-	    VM_WIMG_WCOMB);
-	if (htt_rx == NULL) {
-		say("wcn3990: 13: HTT: the receive ring's memory could not be mapped\n");
-		return;
-	}
 	for (uint32_t i = 0; i < HTT_RX_RING_ENTRIES; i++) {
-		volatile uint8_t *b = htt_rx + HTT_RX_BUFS_AT + (uint64_t)i * HTT_RX_BUF;
+		volatile uint8_t *b = dma + HTT_RX_BUFS_AT + (uint64_t)(i % HTT_RX_BUFFERS) * HTT_RX_BUF;
 
-		*(volatile uint64_t *)(htt_rx + 8 * i) = HTT_RX_PHYS + HTT_RX_BUFS_AT + (uint64_t)i * HTT_RX_BUF;
+		*(volatile uint64_t *)(dma + HTT_RX_RING_AT + 8 * i) = HTT_RX_PHYS + HTT_RX_BUFS_AT +
+		    (uint64_t)(i % HTT_RX_BUFFERS) * HTT_RX_BUF;
 		for (unsigned j = 0; j < 364; j += 4) {
 			*(volatile uint32_t *)(b + j) = 0;
 		}
 	}
 	htt_rx_read = 0;
 	htt_rx_alloc = HTT_RX_FILL;
-	*(volatile uint32_t *)(htt_rx + HTT_RX_IDX_AT) = htt_rx_alloc;
+	*(volatile uint32_t *)(dma + HTT_RX_IDX_AT) = htt_rx_alloc;
 	__asm__ volatile ("dsb sy" ::: "memory");
 	{
-		uint64_t idx = HTT_RX_PHYS + HTT_RX_IDX_AT, base = HTT_RX_PHYS;
+		uint64_t idx = HTT_RX_PHYS + HTT_RX_IDX_AT, base = HTT_RX_PHYS + HTT_RX_RING_AT;
 		static const uint16_t offsets[10] = { 74, 90, 27, 37, 4, 26, 7, 12, 1, 2 };
 		unsigned at = 0;
 
@@ -1139,6 +1145,7 @@ htt_setup(unsigned wmi)
 		say("wcn3990: 13: HTT: a receive ring of %u at %#llx, %u buffers of %u bytes given, its index at %#llx\n",
 		    HTT_RX_RING_ENTRIES, base, HTT_RX_FILL, HTT_RX_BUF, idx);
 		(void)htt_send(m, at, "the receive ring");
+		htt_rx = dma;           /* (polled from now on) */
 	}
 	{
 		static const uint8_t aggregation[4] = { 5, 64, 3, 0 };    /* HTT_H2T_MSG_TYPE_AGGR_CFG: 64 a-mpdu, 3 a-msdu */
