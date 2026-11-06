@@ -286,7 +286,21 @@ board_data(uint32_t board_id)
 	uint32_t left, pieces = 0;
 	bool ok = true;
 
-	if (board_id != 0xff) {
+	char chosen[8] = "";
+
+	/*
+	 * wcn3990_bdf=EXT: the board's data from image/bdwlan.EXT (b0a, 10e, ...). Surya's firmware partition has 17 of them
+	 * besides bdwlan.bin, and its chip gives no board id (0xff), so which one is surya's own is found by trying: with
+	 * bdwlan.bin the radio heard no network (6 November 2026).
+	 */
+	if (PE_parse_boot_argn("wcn3990_bdf", chosen, sizeof(chosen)) && chosen[0] != 0) {
+		snprintf(name, sizeof(name), "image/bdwlan.%s", chosen);
+		data = hakios_adsp_fw_file(name, &size);
+		if (data == NULL) {
+			say("wcn3990: the board's data: no /fw/%s (wcn3990_bdf=%s)\n", name, chosen);
+		}
+	}
+	if (data == NULL && board_id != 0xff) {
 		snprintf(name, sizeof(name), "image/bdwlan.b%02x", board_id & 0xff);
 		data = hakios_adsp_fw_file(name, &size);
 	}
