@@ -1121,6 +1121,31 @@ htt_setup(unsigned wmi)
 	if (level < 2) {
 		return;
 	}
+	{
+		/*
+		 * the fragment descriptors' bank, before the ring, as ath10k_htt_setup() sends it on the WCN3990 (continuous_frag_desc:
+		 * ath10k_htt_send_frag_desc_bank_cfg_64()): one bank of 512 htt_msdu_ext_desc_64 (72 bytes) in our CE memory at
+		 * +0xd2000, the queue state not given (no peer flow control). The two tries with the ring and without this hung.
+		 */
+		uint8_t f[64] = { 0 };
+		uint64_t bank = CE_DMA_PHYS + 0xd2000u;
+
+		for (uint32_t i = 0; i < 512u * 72u; i += 4) {
+			*(volatile uint32_t *)(dma + 0xd2000u + i) = 0;
+		}
+		f[0] = 6;                                       /* HTT_H2T_MSG_TYPE_FRAG_DESC_BANK_CFG */
+		f[1] = 0;                                       /* info: queue depth in bytes, no queue state */
+		f[2] = 1;                                       /* one bank */
+		f[3] = 72;                                      /* sizeof(struct htt_msdu_ext_desc_64) */
+		for (unsigned i = 0; i < 8; i++) {
+			f[4 + i] = (uint8_t)(bank >> (8 * i));
+		}
+		f[36] = 0; f[37] = 0;                           /* bank 0: ids 0 .. 511 */
+		f[38] = 511 & 0xff; f[39] = 511 >> 8;
+		if (!htt_send(f, sizeof(f), "the fragment descriptors' bank")) {
+			return;
+		}
+	}
 
 	for (uint32_t i = 0; i < HTT_RX_RING_ENTRIES; i++) {
 		volatile uint8_t *b = dma + HTT_RX_BUFS_AT + (uint64_t)(i % HTT_RX_BUFFERS) * HTT_RX_BUF;
@@ -1170,6 +1195,13 @@ htt_setup(unsigned wmi)
 
 		(void)htt_send(aggregation, sizeof(aggregation), "the aggregation limits");
 	}
+	/* two seconds with nothing asked of the radio: what HTT says, what the ring gets, before the scan */
+	began = now_ms();
+	while (now_ms() - began < 2000) {
+		(void)wmi_event(wmi, 100, &body, &body_length);
+	}
+	say("wcn3990: 13: HTT: 2 s after the ring: %u HTT messages, %u buffers filled, the ring's index %u\n", htt_messages,
+	    htt_rx_done, *(volatile uint32_t *)(dma + HTT_RX_IDX_AT));
 }
 
 static void
