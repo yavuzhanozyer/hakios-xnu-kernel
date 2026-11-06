@@ -1187,6 +1187,13 @@ htt_setup(unsigned wmi)
 		(void)htt_send(m, at, "the receive ring");
 		htt_rx = dma;           /* (polled from now on) */
 	}
+	/* two seconds with nothing asked of the radio: what HTT says, what the ring gets, before the scan */
+	began = now_ms();
+	while (now_ms() - began < 2000) {
+		(void)wmi_event(wmi, 100, &body, &body_length);
+	}
+	say("wcn3990: 13: HTT: 2 s after the ring: %u HTT messages, %u buffers filled, the ring's index %u\n", htt_messages,
+	    htt_rx_done, *(volatile uint32_t *)(dma + HTT_RX_IDX_AT));
 	if (level < 3) {
 		return;
 	}
@@ -1195,13 +1202,6 @@ htt_setup(unsigned wmi)
 
 		(void)htt_send(aggregation, sizeof(aggregation), "the aggregation limits");
 	}
-	/* two seconds with nothing asked of the radio: what HTT says, what the ring gets, before the scan */
-	began = now_ms();
-	while (now_ms() - began < 2000) {
-		(void)wmi_event(wmi, 100, &body, &body_length);
-	}
-	say("wcn3990: 13: HTT: 2 s after the ring: %u HTT messages, %u buffers filled, the ring's index %u\n", htt_messages,
-	    htt_rx_done, *(volatile uint32_t *)(dma + HTT_RX_IDX_AT));
 }
 
 static void
