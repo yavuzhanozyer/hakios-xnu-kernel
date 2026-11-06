@@ -697,6 +697,8 @@ htc_send(uint8_t endpoint, const uint8_t *payload, unsigned length)
 }
 
 static void show_htc(unsigned ce, const volatile uint8_t *data, unsigned length);
+static void htt_rx_poll(void);
+static unsigned htt_messages;           /* (HTT's messages from the firmware: counted, the first few said) */
 
 /*
  * HTC's credits for WMI's endpoint: what the firmware gives back comes in the trailer of what it sends (flag 0x2: the
@@ -852,9 +854,14 @@ wmi_event(unsigned wmi, uint32_t ms, const uint8_t **body, unsigned *length)
 
 	while (now_ms() - began < ms) {
 		if (!ce_receive(ms - (uint32_t)(now_ms() - began))) {
+			htt_rx_poll();
 			return 0;
 		}
 		htc_credits(rx_data, rx_length);
+		htt_rx_poll();
+		if (rx_data[0] == htt_endpoint && htt_messages++ >= 12) {
+			continue;
+		}
 		if (rx_data[0] != wmi || rx_length < 12) {
 			char hex[3 * 16 + 1] = "";
 
@@ -892,6 +899,8 @@ static struct {
 } seen_bss[48];
 static unsigned seen_count, chan_infos, scan_events;
 
+static void note_80211(const uint8_t *frame, unsigned frame_length, unsigned mhz, int snr, const char *path);
+
 /* A beacon or probe response from the firmware's management rx event: the network it tells of, noted once. */
 static void
 note_frame(const uint8_t *body, unsigned length)
@@ -899,11 +908,24 @@ note_frame(const uint8_t *body, unsigned length)
 	unsigned header_length = 0, frame_length = 0;
 	const uint8_t *header = wmi_find(body, length, TAG_MGMT_RX_HDR, &header_length);
 	const uint8_t *frame = wmi_find(body, length, TAG_ARRAY_BYTE, &frame_length);
+
+	if (header == NULL || frame == NULL || header_length < 24) {
+		return;
+	}
+	note_80211(frame, frame_length, r32(header), (int)r32(header + 4), "wmi");
+}
+
+static unsigned scan_mhz;               /* (the channel the scan is on, from its foreign channel events) */
+
+/* An 802.11 frame: if it is a beacon or a probe response, the network it tells of, noted once. */
+static void
+note_80211(const uint8_t *frame, unsigned frame_length, unsigned mhz, int snr, const char *path)
+{
 	unsigned subtype, at;
 	char ssid[33] = "";
 	unsigned i;
 
-	if (header == NULL || frame == NULL || header_length < 24 || frame_length < 36) {
+	if (frame_length < 36) {
 		return;
 	}
 	subtype = (frame[0] >> 4) & 0xf;
@@ -927,12 +949,202 @@ note_frame(const uint8_t *body, unsigned length)
 	}
 	memcpy(seen_bss[seen_count].bssid, frame + 16, 6);
 	strlcpy(seen_bss[seen_count].ssid, ssid, sizeof(seen_bss[0].ssid));
-	seen_bss[seen_count].mhz = (uint16_t)r32(header);
-	seen_bss[seen_count].snr = (int)r32(header + 4);
-	say("wcn3990: 14: A NETWORK: \"%s\" %02x:%02x:%02x:%02x:%02x:%02x, %u MHz, snr %d (%s)\n", ssid[0] ? ssid : "(hidden)",
-	    frame[16], frame[17], frame[18], frame[19], frame[20], frame[21], seen_bss[seen_count].mhz, seen_bss[seen_count].snr,
-	    subtype == 8 ? "beacon" : "probe response");
+	seen_bss[seen_count].mhz = (uint16_t)mhz;
+	seen_bss[seen_count].snr = snr;
+	say("wcn3990: 14: A NETWORK: \"%s\" %02x:%02x:%02x:%02x:%02x:%02x, %u MHz, snr %d (%s, through %s)\n",
+	    ssid[0] ? ssid : "(hidden)", frame[16], frame[17], frame[18], frame[19], frame[20], frame[21], mhz, snr,
+	    subtype == 8 ? "beacon" : "probe response", path);
 	seen_count++;
+}
+
+/*
+ * HTT, the data path's own protocol (endpoint 1; out through CE4, in through CE1), set up as ath10k_htt_setup() does it
+ * right after WMI's ready: the version asked for, then the receive ring -- ath10k_htt_send_rx_ring_cfg_64(): a ring of
+ * 2048 64-bit buffer addresses and the index of the last one given (alloc_idx), which the firmware reads from our
+ * memory; 1023 given (HTT_RX_RING_FILL_LEVEL), every frame kind asked for, and where in a buffer each part of the WCN3990's
+ * descriptor goes (ath10k_rx_desc_wcn3990_get_offsets(), struct htt_rx_desc_v2: offsets in 4-byte words). Without a ring
+ * the radio has nowhere to put what it hears: the scan of 6 November 2026 heard hundreds of thousands of frames and
+ * gave nothing up. A buffer is the firmware's done when its attention word has MSDU_DONE (bit 31); it is looked at
+ * (a beacon or a probe response in it: a network), cleared, and given back, the ring kept 1023 ahead.
+ */
+#define HTT_RX_RING_ENTRIES     2048u
+#define HTT_RX_FILL             1023u
+#define HTT_RX_BUF              2048u
+#define HTT_RX_PHYS             (HOST_MEMORY_PHYS + HOST_MEMORY_SIZE - 0x500000u)  /* the ring, alloc_idx, then 4 MB of buffers */
+#define HTT_RX_IDX_AT           0x4000u
+#define HTT_RX_BUFS_AT          0x10000u
+#define HTT_TX4_BUFFERS         0xd0000u        /* CE4's: 32 of 256 bytes, in our CE memory */
+#define CE_SHADOW_SR_WR_INDEX_CE4 0x00032010u
+
+static volatile uint8_t *htt_rx;
+static uint32_t htt_rx_read, htt_rx_alloc, htt_rx_done, tx4_write;
+
+static bool
+htt_send(const uint8_t *payload, unsigned length, const char *what)
+{
+	volatile struct ce_desc64 *ring = (volatile struct ce_desc64 *)(dma + 0x5000);
+	volatile uint8_t *buffer = dma + HTT_TX4_BUFFERS + tx4_write * 256;
+	uint64_t pa = CE_DMA_PHYS + HTT_TX4_BUFFERS + (uint64_t)tx4_write * 256;
+	static uint8_t sequence;
+	uint64_t asked;
+
+	if (shadow == NULL || htt_endpoint == 0xff || length + 8 > 256) {
+		say("wcn3990: 13: HTT: %s not sent (endpoint %u)\n", what, htt_endpoint);
+		return false;
+	}
+	buffer[0] = (uint8_t)htt_endpoint;
+	buffer[1] = 0;
+	buffer[2] = (uint8_t)length;
+	buffer[3] = (uint8_t)(length >> 8);
+	buffer[4] = 0;
+	buffer[5] = sequence++;
+	buffer[6] = 0;
+	buffer[7] = 0;
+	for (unsigned i = 0; i < length; i++) {
+		buffer[8 + i] = payload[i];
+	}
+	ring[tx4_write].addr = (pa & 0xffffffffull) | ((pa >> 32) & 0x1f) << 32;
+	ring[tx4_write].nbytes = (uint16_t)(length + 8);
+	ring[tx4_write].flags = (uint16_t)(htt_endpoint << 4);
+	ring[tx4_write].hash = 0;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	tx4_write = (tx4_write + 1) % 32;
+	*(volatile uint32_t *)(shadow + (CE_SHADOW_SR_WR_INDEX_CE4 - CE_SHADOW_SR_WR_INDEX_CE0)) = tx4_write;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	asked = now_ms();
+	while ((*(volatile uint32_t *)(dma + 4 * 4) & 0xffff) != tx4_write && now_ms() - asked < 20) {
+		delay_for_interval(1, NSEC_PER_MSEC);
+	}
+	if ((*(volatile uint32_t *)(dma + 4 * 4) & 0xffff) != tx4_write) {
+		wl_wr(CE_BASE(4) + CE_SR_WR_INDEX, tx4_write);
+		asked = now_ms();
+		while ((*(volatile uint32_t *)(dma + 4 * 4) & 0xffff) != tx4_write && now_ms() - asked < 20) {
+			delay_for_interval(1, NSEC_PER_MSEC);
+		}
+	}
+	say("wcn3990: 13: HTT: %s (%u bytes): CE4 rri %#x, srri %#x\n", what, length, *(volatile uint32_t *)(dma + 4 * 4),
+	    wl_rd(CE_BASE(4) + CE_CURRENT_SRRI));
+	return true;
+}
+
+static void
+htt_rx_poll(void)
+{
+	static uint8_t frame[HTT_RX_BUF];
+	static unsigned shown;
+
+	if (htt_rx == NULL) {
+		return;
+	}
+	for (unsigned n = 0; n < 64; n++) {
+		volatile uint8_t *b = htt_rx + HTT_RX_BUFS_AT + (uint64_t)htt_rx_read * HTT_RX_BUF;
+		uint32_t attention = *(volatile uint32_t *)(b + 1 * 4), msdu = *(volatile uint32_t *)(b + 7 * 4) & 0x3fff;
+		unsigned length;
+
+		if (!(attention & 0x80000000u)) {
+			return;
+		}
+		htt_rx_done++;
+		/* the frame: the MSDU's payload (word 90) if it holds an 802.11 header, else the 64 bytes of header status (word 74) */
+		length = msdu != 0 && msdu <= HTT_RX_BUF - 360 ? msdu : HTT_RX_BUF - 360;
+		for (unsigned i = 0; i < length; i++) {
+			frame[i] = b[360 + i];
+		}
+		if ((frame[0] & 0x0c) != 0 || (frame[0] >> 4 != 8 && frame[0] >> 4 != 5)) {
+			length = 64;
+			for (unsigned i = 0; i < length; i++) {
+				frame[i] = b[296 + i];
+			}
+		}
+		if (shown++ < 6) {
+			say("wcn3990: 14:   HTT rx buffer %u: attention %#x, msdu %u bytes, header %02x %02x .. %02x:%02x:%02x:%02x:%02x:%02x, "
+			    "payload %02x %02x %02x %02x\n", htt_rx_read, attention, msdu, b[296], b[297], b[312], b[313], b[314], b[315],
+			    b[316], b[317], b[360], b[361], b[362], b[363]);
+		}
+		note_80211(frame, length, scan_mhz, 0, "the HTT ring");
+		for (unsigned i = 0; i < 364; i += 4) {
+			*(volatile uint32_t *)(b + i) = 0;
+		}
+		htt_rx_read = (htt_rx_read + 1) % HTT_RX_RING_ENTRIES;
+		htt_rx_alloc = (htt_rx_alloc + 1) % HTT_RX_RING_ENTRIES;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		*(volatile uint32_t *)(htt_rx + HTT_RX_IDX_AT) = htt_rx_alloc;
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
+}
+
+static void
+htt_setup(unsigned wmi)
+{
+	uint8_t m[40];
+	uint64_t began;
+	const uint8_t *body;
+	unsigned body_length;
+
+	{
+		static const uint8_t version[4] = { 0 };          /* HTT_H2T_MSG_TYPE_VERSION_REQ */
+
+		if (!htt_send(version, sizeof(version), "the version asked for")) {
+			return;
+		}
+	}
+	began = now_ms();
+	htt_messages = 0;
+	while (now_ms() - began < 500 && htt_messages == 0) {
+		(void)wmi_event(wmi, 100, &body, &body_length);
+	}
+	say("wcn3990: 13: HTT: %s\n", htt_messages ? "the firmware answered (its version: the CE1 message above)" :
+	    "NO ANSWER to the version request within 500 ms");
+
+	htt_rx = (volatile uint8_t *)ml_io_map_unmappable(HTT_RX_PHYS, HTT_RX_BUFS_AT + HTT_RX_RING_ENTRIES * HTT_RX_BUF,
+	    VM_WIMG_WCOMB);
+	if (htt_rx == NULL) {
+		say("wcn3990: 13: HTT: the receive ring's memory could not be mapped\n");
+		return;
+	}
+	for (uint32_t i = 0; i < HTT_RX_RING_ENTRIES; i++) {
+		volatile uint8_t *b = htt_rx + HTT_RX_BUFS_AT + (uint64_t)i * HTT_RX_BUF;
+
+		*(volatile uint64_t *)(htt_rx + 8 * i) = HTT_RX_PHYS + HTT_RX_BUFS_AT + (uint64_t)i * HTT_RX_BUF;
+		for (unsigned j = 0; j < 364; j += 4) {
+			*(volatile uint32_t *)(b + j) = 0;
+		}
+	}
+	htt_rx_read = 0;
+	htt_rx_alloc = HTT_RX_FILL;
+	*(volatile uint32_t *)(htt_rx + HTT_RX_IDX_AT) = htt_rx_alloc;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	{
+		uint64_t idx = HTT_RX_PHYS + HTT_RX_IDX_AT, base = HTT_RX_PHYS;
+		static const uint16_t offsets[10] = { 74, 90, 27, 37, 4, 26, 7, 12, 1, 2 };
+		unsigned at = 0;
+
+		m[at++] = 2;                                    /* HTT_H2T_MSG_TYPE_RX_RING_CFG */
+		m[at++] = 1;                                    /* one ring */
+		m[at++] = 0; m[at++] = 0;
+		for (unsigned i = 0; i < 8; i++) {
+			m[at++] = (uint8_t)(idx >> (8 * i));
+		}
+		for (unsigned i = 0; i < 8; i++) {
+			m[at++] = (uint8_t)(base >> (8 * i));
+		}
+		m[at++] = HTT_RX_RING_ENTRIES & 0xff; m[at++] = HTT_RX_RING_ENTRIES >> 8;
+		m[at++] = HTT_RX_BUF & 0xff; m[at++] = HTT_RX_BUF >> 8;
+		m[at++] = 0xff; m[at++] = 0xff;                 /* every HTT_RX_RING_FLAGS_, as ath10k sets them */
+		m[at++] = HTT_RX_FILL & 0xff; m[at++] = HTT_RX_FILL >> 8;
+		for (unsigned i = 0; i < 10; i++) {
+			m[at++] = (uint8_t)offsets[i];
+			m[at++] = (uint8_t)(offsets[i] >> 8);
+		}
+		say("wcn3990: 13: HTT: a receive ring of %u at %#llx, %u buffers of %u bytes given, its index at %#llx\n",
+		    HTT_RX_RING_ENTRIES, base, HTT_RX_FILL, HTT_RX_BUF, idx);
+		(void)htt_send(m, at, "the receive ring");
+	}
+	{
+		static const uint8_t aggregation[4] = { 5, 64, 3, 0 };    /* HTT_H2T_MSG_TYPE_AGGR_CFG: 64 a-mpdu, 3 a-msdu */
+
+		(void)htt_send(aggregation, sizeof(aggregation), "the aggregation limits");
+	}
 }
 
 static void
@@ -1054,6 +1266,8 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 		    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 	}
 
+	htt_setup(wmi);
+
 	/*
 	 * the regulatory domain, as ath10k_regd_update() gives it after the init: the EEPROM's own (the service ready's HAL
 	 * register capabilities), for both bands, the conformance limits ETSI's (0x30, which Turkey's are)
@@ -1139,6 +1353,9 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 			if (event != NULL && event_length >= 8) {
 				uint32_t type = r32(event);
 
+				if (type & 0x8 && event_length >= 12) {
+					scan_mhz = r32(event + 8);
+				}
 				if (scan_events++ < 12) {
 					say("wcn3990: 14:   scan event %#x, reason %u, %u MHz\n", type, r32(event + 4),
 					    event_length >= 12 ? r32(event + 8) : 0);
@@ -1155,6 +1372,7 @@ wmi_scan(unsigned wmi, const uint8_t *ready, unsigned length)
 			say("wcn3990: 14:   (event %#x)\n", id);
 		}
 	}
+	say("wcn3990: 14: the HTT ring: %u buffers filled by the firmware, %u HTT messages\n", htt_rx_done, htt_messages);
 	say("wcn3990: 14: THE SCAN FOUND %u NETWORKS\n", seen_count);
 }
 
