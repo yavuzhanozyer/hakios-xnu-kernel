@@ -286,18 +286,30 @@ board_data(uint32_t board_id)
 	uint32_t left, pieces = 0;
 	bool ok = true;
 
-	char chosen[8] = "";
+	char chosen[24] = "";
 
 	/*
-	 * wcn3990_bdf=EXT: the board's data from image/bdwlan.EXT (b0a, 10e, ...). Surya's firmware partition has 17 of them
-	 * besides bdwlan.bin, and its chip gives no board id (0xff), so which one is surya's own is found by trying: with
-	 * bdwlan.bin the radio heard no network (6 November 2026).
+	 * Which board data. The chip gives no board id (0xff), and the firmware partition's image/ has eighteen bdwlan.*
+	 * that are Qualcomm's reference boards', none of them this phone's: with bdwlan.bin and with bdwlan.b0a the radio
+	 * was deaf (6 November 2026: a noise floor of -117 and -119 dBm, a scan of every channel with its events, and not
+	 * one frame up, by WMI or into HTT's ring). Xiaomi's own for surya ("J20" in its names) is bdf_j20g.bin, the file
+	 * mainline Linux's ath10k runs this phone's Wi-Fi with (sm7150-mainline's board-2.bin: variant=xiaomi_surya);
+	 * the POCO X3 of India (karna) has bdf_j20i.bin. So: wcn3990_bdf=NAME if given (a whole file name of image/ if it
+	 * has a dot, else bdwlan.NAME), then bdf_j20g.bin, then the board id's, then bdwlan.bin, which is said loudly.
 	 */
 	if (PE_parse_boot_argn("wcn3990_bdf", chosen, sizeof(chosen)) && chosen[0] != 0) {
-		snprintf(name, sizeof(name), "image/bdwlan.%s", chosen);
+		snprintf(name, sizeof(name), strchr(chosen, '.') != NULL ? "image/%s" : "image/bdwlan.%s", chosen);
 		data = hakios_adsp_fw_file(name, &size);
 		if (data == NULL) {
 			say("wcn3990: the board's data: no /fw/%s (wcn3990_bdf=%s)\n", name, chosen);
+		}
+	}
+	if (data == NULL) {
+		strlcpy(name, "image/bdf_j20g.bin", sizeof(name));
+		data = hakios_adsp_fw_file(name, &size);
+		if (data == NULL) {
+			say("wcn3990: the board's data: NO /fw/image/bdf_j20g.bin, SURYA'S OWN: a reference board's is sent instead, and with "
+			    "those the radio hears nothing (devices/surya/pull-firmware.sh pulls it; then MODEM=1 SYSTEM=1 userland/build.sh)\n");
 		}
 	}
 	if (data == NULL && board_id != 0xff) {

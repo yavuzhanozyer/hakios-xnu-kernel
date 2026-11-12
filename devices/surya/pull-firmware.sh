@@ -64,6 +64,23 @@ wlanmdsp.mbn $( [ -f fw-modem/image/wlanmdsp.mbn ] && echo there || echo NOT THE
 else
 	echo "pull-firmware.sh: $img could not be pulled whole"
 fi
+# The WCN3990's board data that is this phone's own: Xiaomi's bdf_j20g.bin (surya is "J20"; India's POCO X3, karna, has
+# bdf_j20i.bin). The eighteen bdwlan.* of image/ are Qualcomm's reference boards', and with them the radio hears nothing
+# (devices/surya/drivers/wifi/hakios.wcn3990.c sends bdf_j20g.bin first). It is looked for where Xiaomi's builds keep it,
+# beside the partition's image/ if it is not in it, and put into fw-modem/image, which goes into the system image's /fw/image.
+if [ -d fw-modem/image ]; then
+	for f in $(adb shell 'ls /vendor/firmware/bdf_*.bin /vendor/firmware/bd_*.bin /vendor/firmware/wlan/bdf_*.bin \
+		/vendor/etc/wifi/bdf_*.bin /vendor/firmware_mnt/image/bdf_*.bin /firmware/image/bdf_*.bin 2>/dev/null' | tr -d '\r'); do
+		[ -f "fw-modem/image/$(basename "$f")" ] || adb pull "$f" fw-modem/image/ >/dev/null 2>&1 || true
+	done
+	if [ -f fw-modem/image/bdf_j20g.bin ]; then
+		echo "pull-firmware.sh: fw-modem/image/bdf_j20g.bin: the WCN3990's board data of this phone, there"
+	else
+		echo "pull-firmware.sh: NO bdf_j20g.bin found on the phone (the WCN3990's own board data): find it with"
+		echo "    adb shell 'find /vendor /odm /firmware -name \"bdf_*\" -o -name \"bd_j20*\" 2>/dev/null'"
+		echo "  and put it into fw-modem/image/; without it the Wi-Fi's radio hears nothing"
+	fi
+fi
 [ -z "$mounted" ] || adb shell "umount /tmp/hakios-fw; rmdir /tmp/hakios-fw" 2>/dev/null || true
 for f in novatek_ts_tianma_fw.bin novatek_ts_huaxing_fw.bin; do
 	adb pull "/vendor/firmware/$f" fw-touch/ >/dev/null 2>&1 || echo "pull-firmware.sh: /vendor/firmware/$f: not on the phone"
