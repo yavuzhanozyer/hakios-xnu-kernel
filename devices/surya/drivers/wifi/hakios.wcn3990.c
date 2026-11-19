@@ -274,19 +274,36 @@ hakios_wcn3990_modem_down(void)
 	regions_ours_again = true;
 }
 
+/*
+ * One candidate for the board's data: /fw/name, read whole, if it is there and of a size a board's data can be (not
+ * empty, as a pull cut short leaves it, nor over 1 MB); otherwise NULL, said, and the next candidate is tried.
+ */
+static const uint8_t *
+board_data_file(const char *name, uint64_t *size)
+{
+	const uint8_t *data = hakios_adsp_fw_file(name, size);
+
+	if (data != NULL && (*size == 0 || *size > 1024 * 1024)) {
+		say("wcn3990: the board's data: /fw/%s is %llu bytes, not a board's data: the next one is tried\n", name, *size);
+		hakios_adsp_fw_free(data, *size);
+		data = NULL;
+	}
+	return data;
+}
+
 /* The board's data, as ath10k_qmi_bdf_dnld_send_sync() sends it: file id 0, pieces of 6144, "end" on the last. */
 static bool
 board_data(uint32_t board_id)
 {
 	static struct wlfw_bdf_download_req_msg_v01 request;
 	struct wlfw_bdf_download_resp_msg_v01 reply;
-	char name[32];
+	char name[64];
 	uint64_t size = 0, began = now_ms();
 	const uint8_t *data = NULL, *at;
 	uint32_t left, pieces = 0;
 	bool ok = true;
 
-	char chosen[24] = "";
+	char chosen[48] = "";
 
 	/*
 	 * Which board data. The chip gives no board id (0xff), and the firmware partition's image/ has eighteen bdwlan.*
@@ -299,14 +316,14 @@ board_data(uint32_t board_id)
 	 */
 	if (PE_parse_boot_argn("wcn3990_bdf", chosen, sizeof(chosen)) && chosen[0] != 0) {
 		snprintf(name, sizeof(name), strchr(chosen, '.') != NULL ? "image/%s" : "image/bdwlan.%s", chosen);
-		data = hakios_adsp_fw_file(name, &size);
+		data = board_data_file(name, &size);
 		if (data == NULL) {
 			say("wcn3990: the board's data: no /fw/%s (wcn3990_bdf=%s)\n", name, chosen);
 		}
 	}
 	if (data == NULL) {
 		strlcpy(name, "image/bdf_j20g.bin", sizeof(name));
-		data = hakios_adsp_fw_file(name, &size);
+		data = board_data_file(name, &size);
 		if (data == NULL) {
 			say("wcn3990: the board's data: NO /fw/image/bdf_j20g.bin, SURYA'S OWN: a reference board's is sent instead, and with "
 			    "those the radio hears nothing (devices/surya/pull-firmware.sh pulls it; then MODEM=1 SYSTEM=1 userland/build.sh)\n");
@@ -314,18 +331,15 @@ board_data(uint32_t board_id)
 	}
 	if (data == NULL && board_id != 0xff) {
 		snprintf(name, sizeof(name), "image/bdwlan.b%02x", board_id & 0xff);
-		data = hakios_adsp_fw_file(name, &size);
+		data = board_data_file(name, &size);
 	}
 	if (data == NULL) {
 		strlcpy(name, "image/bdwlan.bin", sizeof(name));
-		data = hakios_adsp_fw_file(name, &size);
+		data = board_data_file(name, &size);
 	}
-	if (data == NULL || size == 0 || size > 1024 * 1024) {
-		say("wcn3990: the board's data: no /fw/image/bdwlan.b%02x nor bdwlan.bin on the root (pull-firmware.sh, then MODEM=1 "
-		    "SYSTEM=1 userland/build.sh)\n", board_id & 0xff);
-		if (data != NULL) {
-			hakios_adsp_fw_free(data, size);
-		}
+	if (data == NULL) {
+		say("wcn3990: the board's data: none usable on the root, the last tried /fw/%s (pull-firmware.sh, then MODEM=1 "
+		    "SYSTEM=1 userland/build.sh)\n", name);
 		return false;
 	}
 	say("wcn3990: the board's data: fw/%s, %llu bytes, beginning %02x %02x %02x %02x\n", name, size, data[0], data[1], data[2],
