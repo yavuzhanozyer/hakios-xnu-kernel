@@ -75,7 +75,14 @@
 
 #define GIC_SGI_SIGNAL          0           /* cpu_signal(): another processor wants this one's attention */
 #define GIC_SGI_STOP            1           /* psci_smp_stop_here(): the system is going back to the boot loader */
-#define GIC_INTID_VTIMER        27          /* EL1 virtual timer PPI */
+/*
+ * The EL1 virtual timer's interrupt: PPI 27 as ARM numbers it, and as the SC7280 (redwood) and QEMU have it. Older
+ * Qualcomm SoCs number their timer PPIs from 16 instead (the device tree's <GIC_PPI 3 ...>: 19 for the virtual timer;
+ * SDM845, SM7150, the POCO X3 NFC), and a kernel waiting on 27 there never hears its timer and stops at its first
+ * timed sleep. boot-arg vtimer_intid=N (16 to 31); a board's `boot { bootargs }` gives it (surya: 19).
+ */
+static uint32_t gic_intid_vtimer = 27;
+#define GIC_INTID_VTIMER        gic_intid_vtimer
 #define GIC_INTID_SPI_MIN       32
 #define GIC_INTID_SPURIOUS_MIN  1020
 #define GIC_INTID_SPURIOUS_MOST 1023        /* 1020 to 1023 are no interrupt; above them there are others */
@@ -461,7 +468,7 @@ gic_v3_irq_cpu_init(void)
 {
 	int cpu = cpu_number();
 	vm_offset_t gicr;
-	uint32_t mine = 1u << GIC_INTID_VTIMER;
+	uint32_t mine;
 
 	/*
 	 * (the device tree's node is read once, by the boot processor; the rest is done every time a
@@ -472,6 +479,11 @@ gic_v3_irq_cpu_init(void)
 		DTEntry entry;
 		void const *prop;
 		unsigned int prop_size;
+		uint32_t vtimer = 0;
+
+		if (PE_parse_boot_argn("vtimer_intid", &vtimer, sizeof(vtimer)) && vtimer >= 16 && vtimer <= 31) {
+			gic_intid_vtimer = vtimer;
+		}
 
 		if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
 		    SecureDTGetProperty(entry, "reg", &prop, &prop_size) != kSuccess ||
@@ -543,6 +555,7 @@ gic_v3_irq_cpu_init(void)
 	 * kernel switched off in the middle of one (a return to the boot loader, started again
 	 * since) may still have it marked active, and would then never see another.
 	 */
+	mine = 1u << GIC_INTID_VTIMER;  /* (after the boot-arg has been read, above, on the first processor) */
 	if (ml_get_cpu_count() > 1) {
 		uint32_t sgis = (1u << GIC_SGI_SIGNAL) | (1u << GIC_SGI_STOP);
 
