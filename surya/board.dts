@@ -1,0 +1,70 @@
+/dts-v1/;
+
+// Xiaomi POCO X3 NFC. Started by tools/boards.py new from surya.dts.
+// Every value here is to be checked against the device before it is relied on (Documentation/porting.md).
+/ {
+	name = "surya";                         // what the loader puts in /chosen/darwin-board
+	description = "Xiaomi POCO X3 NFC";
+	soc = "sm7150";
+
+	// Nothing yet: a feature is listed once its driver has been seen to work on this board
+	// (Documentation/porting.md goes through them in the order to try).
+	features = <>;
+
+	// The panel: qcom,mdss_dsi_nt36672c_tianma_fhd_video ("nt36672c tianma fhd video mode dsi panel")
+	backlight {
+		type = "soft";
+	};
+
+	// The keys on the PMICs, for the feature "buttons-pmic": SPMI slave << 8 | the high byte of the
+	// peripheral's registers.
+	buttons {
+		pon = <0x408>;
+		pon-name = "the PM6150L's power-on block";
+		volume-up = <0x4c1>;
+		volume-up-name = "GPIO2 of the PM6150L";
+	};
+
+	// The PMIC's real-time clock, read once at boot (rtc=0 leaves it alone): SPMI slave << 8 | the high byte
+	// of its RTC_RW block's registers.
+	rtc {
+		peripheral = <0x060>;
+		name = "the PM6150's RTC";
+	};
+
+	// The audio DSP, for the feature "adsp": its reserved memory is from the tree; the directory with
+	// this phone's adsp.mdt and its parts is yours to name (arch/arm64/boot/dts/_template/board.dts).
+	// adsp {
+		// firmware = "fw-audio-surya";
+		// memory = <0x95700000>;
+		// memory-size = <0x01e00000>;
+	// };
+
+	// The microphones' codec, for the feature "mic-wcd938x": its reset pin is from the tree.
+	mic {
+		codec-reset = <29>;
+	};
+	// The loader under this phone's UEFI (Mu-Silicium's suryaPkg), which knows its board by the framebuffer the firmware
+	// reports: 1080 x 2400 at 0x9C000000 ("Display Reserved"). The firmware has Qualcomm's charger protocols
+	// (QcomChargerDxe, ChargerExDxe), which the loader reads for the battery.
+	loader {
+		fb-base = <0x9C000000>;
+		log-other-cpu;
+		uefi-charger;
+	};
+
+	// Its UEFI as mkboot.py packs it for `fastboot boot`: Mu-Silicium's surya.toml: FD_BASE 0x9FC00000, 3 MB.
+	uefi {
+		fd-base = <0x9FC00000>;
+		fd-size = <0x300000>;
+	};
+
+	// How darwin/tools/boot26.py starts this phone. The virtual timer is INTID 19 on this SoC, not 27
+	// (vtimer_intid: arch/arm64/kernel/gic_v3_irq.c): without it the kernel stops at its first timed sleep.
+	// The kernel runs on core 7 with 8 cores, as on the other branch (bootcpu is the main branch's argument).
+	boot {
+		fastboot-product = "surya";
+		cpus = <8>;
+		bootargs = "vtimer_intid=19";
+	};
+};
